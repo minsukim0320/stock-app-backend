@@ -1,5 +1,12 @@
 import yfinance as yf
 
+ECONOMY_KEYWORDS = [
+    "stock", "market", "economy", "economic", "finance", "financial",
+    "earnings", "revenue", "profit", "loss", "invest", "fund", "trade",
+    "gdp", "inflation", "fed", "bank", "interest rate", "bond", "etf",
+    "dividend", "nasdaq", "s&p", "shares", "quarter", "fiscal", "growth",
+]
+
 
 def get_stock_price(ticker: str) -> dict:
     stock = yf.Ticker(ticker)
@@ -33,13 +40,20 @@ def get_english_news(ticker: str, limit: int = 20) -> list[dict]:
     stock = yf.Ticker(ticker)
     raw_news = stock.news or []
     result = []
-    for item in raw_news[:limit]:
+    for item in raw_news:
         content = item.get("content", {})
+        title = content.get("title", "")
+        summary = content.get("summary", "")
+        combined = (title + " " + summary).lower()
+        if not any(kw in combined for kw in ECONOMY_KEYWORDS):
+            continue
         result.append({
-            "title": content.get("title", ""),
-            "summary": content.get("summary", ""),
+            "title": title,
+            "summary": summary,
             "url": content.get("canonicalUrl", {}).get("url", ""),
             "source": content.get("provider", {}).get("displayName", ""),
             "published_at": content.get("pubDate", ""),
         })
+        if len(result) >= limit:
+            break
     return result

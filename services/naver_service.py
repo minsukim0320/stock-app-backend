@@ -1,4 +1,5 @@
 import os
+import re
 import requests
 from dotenv import load_dotenv
 
@@ -18,6 +19,12 @@ TICKER_KO_MAP = {
     "META": "메타 주식",
 }
 
+FINANCE_KEYWORDS_KO = [
+    "주식", "증권", "금융", "경제", "투자", "펀드", "시장", "나스닥",
+    "코스피", "etf", "배당", "실적", "매출", "수익", "주가", "상장",
+    "채권", "환율", "금리", "인플레이션", "무역", "수출", "수입",
+]
+
 
 def get_korean_news(ticker: str, limit: int = 100) -> list[dict]:
     keyword = TICKER_KO_MAP.get(ticker.upper(), f"{ticker} 주식")
@@ -34,18 +41,23 @@ def get_korean_news(ticker: str, limit: int = 100) -> list[dict]:
     response = requests.get(url, headers=headers, params=params)
     response.raise_for_status()
     items = response.json().get("items", [])
-    return [
-        {
-            "title": _strip_html(item.get("title", "")),
-            "summary": _strip_html(item.get("description", "")),
+
+    result = []
+    for item in items:
+        title = _strip_html(item.get("title", ""))
+        summary = _strip_html(item.get("description", ""))
+        combined = (title + " " + summary).lower()
+        if not any(kw in combined for kw in FINANCE_KEYWORDS_KO):
+            continue
+        result.append({
+            "title": title,
+            "summary": summary,
             "url": item.get("originallink") or item.get("link", ""),
             "source": "",
             "published_at": item.get("pubDate", ""),
-        }
-        for item in items
-    ]
+        })
+    return result
 
 
 def _strip_html(text: str) -> str:
-    import re
     return re.sub(r"<[^>]+>", "", text)
