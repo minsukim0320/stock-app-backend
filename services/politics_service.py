@@ -9,11 +9,18 @@ load_dotenv()
 NAVER_CLIENT_ID = os.getenv("NAVER_CLIENT_ID")
 NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET")
 
-KOREAN_POLITICS_KEYWORD = "한국 정치 외교 경제"
+KOREAN_ECONOMY_KEYWORD = "한국 경제 금융 증권"
 
 INTERNATIONAL_RSS_FEEDS = [
-    "https://feeds.bbci.co.uk/news/world/rss.xml",
-    "https://feeds.reuters.com/reuters/worldNews",
+    "https://feeds.bbci.co.uk/news/business/rss.xml",
+    "https://feeds.reuters.com/reuters/businessNews",
+]
+
+ECONOMY_KEYWORDS = [
+    "economy", "economic", "finance", "financial", "stock", "market",
+    "trade", "gdp", "inflation", "fed", "bank", "investment", "currency",
+    "debt", "growth", "recession", "interest rate", "bond", "fund",
+    "fiscal", "monetary", "export", "import", "tariff", "oil", "energy",
 ]
 
 
@@ -24,7 +31,7 @@ def get_korean_politics_news(limit: int = 100) -> list[dict]:
         "X-Naver-Client-Secret": NAVER_CLIENT_SECRET,
     }
     params = {
-        "query": KOREAN_POLITICS_KEYWORD,
+        "query": KOREAN_ECONOMY_KEYWORD,
         "display": limit,
         "sort": "sim",
     }
@@ -49,9 +56,14 @@ def get_international_news(limit: int = 50) -> list[dict]:
         try:
             feed = feedparser.parse(feed_url)
             for entry in feed.entries:
+                title = entry.get("title", "")
+                summary = _strip_html(entry.get("summary", ""))
+                combined = (title + " " + summary).lower()
+                if not any(kw in combined for kw in ECONOMY_KEYWORDS):
+                    continue
                 results.append({
-                    "title": entry.get("title", ""),
-                    "summary": _strip_html(entry.get("summary", "")),
+                    "title": title,
+                    "summary": summary,
                     "url": entry.get("link", ""),
                     "source": feed.feed.get("title", ""),
                     "published_at": entry.get("published", ""),
