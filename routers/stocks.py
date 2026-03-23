@@ -23,7 +23,7 @@ def stock_chart(ticker: str, period: str = "1mo"):
 
 
 @router.get("/news/korean-politics")
-def korean_politics_news(limit: int = 20):
+def korean_politics_news(limit: int = 40):
     try:
         return get_korean_politics_news(limit)
     except Exception as e:
@@ -31,7 +31,7 @@ def korean_politics_news(limit: int = 20):
 
 
 @router.get("/news/international")
-def international_news(limit: int = 20):
+def international_news(limit: int = 40):
     try:
         return get_international_news(limit)
     except Exception as e:
@@ -39,7 +39,7 @@ def international_news(limit: int = 20):
 
 
 @router.get("/{ticker}/news/en")
-def english_news(ticker: str, limit: int = 30):
+def english_news(ticker: str, limit: int = 40):
     try:
         return get_english_news(ticker, limit)
     except Exception as e:
@@ -47,7 +47,7 @@ def english_news(ticker: str, limit: int = 30):
 
 
 @router.get("/{ticker}/news/ko")
-def korean_news(ticker: str, limit: int = 20):
+def korean_news(ticker: str, limit: int = 40):
     try:
         return get_korean_news(ticker, limit)
     except Exception as e:

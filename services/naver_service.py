@@ -2,6 +2,7 @@ import os
 import re
 import requests
 from dotenv import load_dotenv
+from services.news_utils import deduplicate_news, format_news_for_prompt
 
 load_dotenv()
 
@@ -42,21 +43,21 @@ def get_korean_news(ticker: str, limit: int = 100) -> list[dict]:
     response.raise_for_status()
     items = response.json().get("items", [])
 
-    result = []
+    raw = []
     for item in items:
         title = _strip_html(item.get("title", ""))
         summary = _strip_html(item.get("description", ""))
         combined = (title + " " + summary).lower()
         if not any(kw in combined for kw in FINANCE_KEYWORDS_KO):
             continue
-        result.append({
+        raw.append({
             "title": title,
             "summary": summary,
             "url": item.get("originallink") or item.get("link", ""),
             "source": "",
             "published_at": item.get("pubDate", ""),
         })
-    return result
+    return format_news_for_prompt(deduplicate_news(raw))
 
 
 def _strip_html(text: str) -> str:

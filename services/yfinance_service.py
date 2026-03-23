@@ -1,4 +1,5 @@
 import yfinance as yf
+from services.news_utils import deduplicate_news, format_news_for_prompt
 
 ECONOMY_KEYWORDS = [
     "stock", "market", "economy", "economic", "finance", "financial",
@@ -36,10 +37,10 @@ def get_chart_data(ticker: str, period: str = "1mo") -> list[dict]:
     return result
 
 
-def get_english_news(ticker: str, limit: int = 20) -> list[dict]:
+def get_english_news(ticker: str, limit: int = 40) -> list[dict]:
     stock = yf.Ticker(ticker)
     raw_news = stock.news or []
-    result = []
+    raw = []
     for item in raw_news:
         content = item.get("content", {})
         title = content.get("title", "")
@@ -47,13 +48,12 @@ def get_english_news(ticker: str, limit: int = 20) -> list[dict]:
         combined = (title + " " + summary).lower()
         if not any(kw in combined for kw in ECONOMY_KEYWORDS):
             continue
-        result.append({
+        raw.append({
             "title": title,
             "summary": summary,
             "url": content.get("canonicalUrl", {}).get("url", ""),
             "source": content.get("provider", {}).get("displayName", ""),
             "published_at": content.get("pubDate", ""),
         })
-        if len(result) >= limit:
-            break
-    return result
+    deduped = deduplicate_news(raw)
+    return format_news_for_prompt(deduped[:limit])

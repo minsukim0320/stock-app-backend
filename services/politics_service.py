@@ -3,6 +3,7 @@ import re
 import requests
 import feedparser
 from dotenv import load_dotenv
+from services.news_utils import deduplicate_news, format_news_for_prompt
 
 load_dotenv()
 
@@ -38,7 +39,7 @@ def get_korean_politics_news(limit: int = 100) -> list[dict]:
     response = requests.get(url, headers=headers, params=params)
     response.raise_for_status()
     items = response.json().get("items", [])
-    return [
+    raw = [
         {
             "title": _strip_html(item.get("title", "")),
             "summary": _strip_html(item.get("description", "")),
@@ -48,6 +49,7 @@ def get_korean_politics_news(limit: int = 100) -> list[dict]:
         }
         for item in items
     ]
+    return format_news_for_prompt(deduplicate_news(raw))
 
 
 def get_international_news(limit: int = 50) -> list[dict]:
@@ -70,7 +72,8 @@ def get_international_news(limit: int = 50) -> list[dict]:
                 })
         except Exception:
             continue
-    return results[:limit]
+    deduped = deduplicate_news(results)
+    return format_news_for_prompt(deduped[:limit])
 
 
 def _strip_html(text: str) -> str:
