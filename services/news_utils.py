@@ -38,11 +38,12 @@ def deduplicate_news(articles: list[dict], threshold: float = 0.55) -> list[dict
 
 def format_news_for_prompt(articles: list[dict]) -> list[dict]:
     """
-    _mention_count가 2 이상인 기사에 [반복 N회] 태그를 제목에 추가합니다.
+    _mention_count 내림차순 정렬 후, 2회 이상 언급된 기사에 [반복 N회] 태그를 추가합니다.
     Gemini가 반복 언급 이슈에 더 높은 중요도를 부여하도록 유도합니다.
     """
+    sorted_articles = sorted(articles, key=lambda x: -x.get('_mention_count', 1))
     result = []
-    for a in articles:
+    for a in sorted_articles:
         count = a.get('_mention_count', 1)
         title = a.get('title', '')
         if count >= 2:
@@ -54,6 +55,4 @@ def format_news_for_prompt(articles: list[dict]) -> list[dict]:
             'source': a.get('source', ''),
             'published_at': a.get('published_at', ''),
         })
-    # mention_count 내림차순 정렬 (중요 이슈 먼저)
-    result.sort(key=lambda x: -articles[result.index(x)].get('_mention_count', 1))
     return result
