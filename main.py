@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from routers.stocks import router as stocks_router
+from routers.tracking import router as tracking_router
 import os
 
 app = FastAPI(title="US Stock News API")
@@ -14,6 +15,7 @@ app.add_middleware(
 )
 
 app.include_router(stocks_router)
+app.include_router(tracking_router)
 
 LOG_FILE = os.path.join(os.path.dirname(__file__), "client_errors.log")
 MAX_BYTES = 1 * 1024 * 1024  # 1MB
