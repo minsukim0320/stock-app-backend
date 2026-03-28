@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from services.yfinance_service import get_stock_price, get_english_news, get_chart_data
+from services.yfinance_service import get_stock_price, get_english_news, get_chart_data, get_fundamentals
 from services.naver_service import get_korean_news
 from services.politics_service import get_korean_politics_news, get_international_news
 
@@ -18,6 +18,14 @@ def stock_price(ticker: str):
 def stock_chart(ticker: str, period: str = "1mo"):
     try:
         return get_chart_data(ticker, period)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{ticker}/fundamentals")
+def stock_fundamentals(ticker: str):
+    try:
+        return get_fundamentals(ticker)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

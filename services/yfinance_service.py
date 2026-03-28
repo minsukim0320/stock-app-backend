@@ -57,3 +57,35 @@ def get_english_news(ticker: str, limit: int = 40) -> list[dict]:
         })
     deduped = deduplicate_news(raw)
     return format_news_for_prompt(deduped[:limit])
+
+
+def get_fundamentals(ticker: str) -> dict:
+    stock = yf.Ticker(ticker)
+    info = stock.info
+
+    def safe(key, scale=1, decimals=2):
+        val = info.get(key)
+        if val is None or not isinstance(val, (int, float)):
+            return None
+        return round(val * scale, decimals)
+
+    return {
+        "ticker": ticker.upper(),
+        "trailing_pe":        safe("trailingPE"),
+        "forward_pe":         safe("forwardPE"),
+        "peg_ratio":          safe("pegRatio"),
+        "price_to_book":      safe("priceToBook"),
+        "trailing_eps":       safe("trailingEps"),
+        "forward_eps":        safe("forwardEps"),
+        "revenue_growth":     safe("revenueGrowth",     scale=100),
+        "earnings_growth":    safe("earningsGrowth",    scale=100),
+        "gross_margins":      safe("grossMargins",      scale=100),
+        "operating_margins":  safe("operatingMargins",  scale=100),
+        "profit_margins":     safe("profitMargins",     scale=100),
+        "debt_to_equity":     safe("debtToEquity"),
+        "current_ratio":      safe("currentRatio"),
+        "return_on_equity":   safe("returnOnEquity",    scale=100),
+        "return_on_assets":   safe("returnOnAssets",    scale=100),
+        "short_percent":      safe("shortPercentOfFloat", scale=100),
+        "market_cap":         info.get("marketCap"),
+    }
