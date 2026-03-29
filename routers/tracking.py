@@ -37,6 +37,7 @@ class PatchBody(BaseModel):
     return_percent: Optional[float] = None
     is_success: Optional[bool] = None
     ai_critique: Optional[str] = None
+    thesis_feedback: Optional[str] = None
 
 
 @router.get("/{device_id}")
