@@ -37,7 +37,7 @@ def get_korean_news(ticker: str, limit: int = 100) -> list[dict]:
     params = {
         "query": keyword,
         "display": limit,
-        "sort": "sim",
+        "sort": "date",
     }
     response = requests.get(url, headers=headers, params=params)
     response.raise_for_status()
