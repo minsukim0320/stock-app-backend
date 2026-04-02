@@ -173,6 +173,37 @@ def get_historical_news(ticker: str, target_date: str, finnhub_api_key: str, day
         return []
 
 
+def get_historical_international_news(target_date: str, finnhub_api_key: str, days_before: int = 14) -> list[dict]:
+    """Finnhub 일반 마켓 뉴스로 국제 정세 뉴스 조회"""
+    if not finnhub_api_key:
+        return []
+    try:
+        dt  = datetime.strptime(target_date, "%Y-%m-%d")
+        frm = int((dt - timedelta(days=days_before)).timestamp())
+        to  = int(dt.timestamp())
+        url = "https://finnhub.io/api/v1/news"
+        params = {
+            "category": "general",
+            "minId":    frm,
+            "token":    finnhub_api_key,
+        }
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        articles = resp.json() if isinstance(resp.json(), list) else []
+        result = []
+        for a in articles[:30]:
+            result.append({
+                "title":        a.get("headline", ""),
+                "summary":      a.get("summary", ""),
+                "url":          a.get("url", ""),
+                "source":       a.get("source", ""),
+                "published_at": a.get("datetime", ""),
+            })
+        return result
+    except Exception:
+        return []
+
+
 def get_full_historical_context(
     tickers: list[str],
     target_date: str,
@@ -192,6 +223,10 @@ def get_full_historical_context(
     fundamentals = {}
     news = {}
 
+    intl_news = []
+    if finnhub_api_key:
+        intl_news = get_historical_international_news(target_date, finnhub_api_key)
+
     for ticker in tickers:
         charts[ticker]       = get_historical_chart(ticker, target_date, months=3)
         fundamentals[ticker] = get_historical_fundamentals(ticker, target_date)
@@ -205,4 +240,5 @@ def get_full_historical_context(
         "charts":        charts,
         "fundamentals":  fundamentals,
         "news":          news,
+        "intl_news":     intl_news,
     }
