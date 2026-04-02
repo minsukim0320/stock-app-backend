@@ -140,36 +140,33 @@ def get_historical_fundamentals(ticker: str, target_date: str) -> dict:
         return {"ticker": ticker.upper()}
 
 
-def get_historical_news(ticker: str, target_date: str, news_api_key: str, days_before: int = 7) -> list[dict]:
-    """NewsAPI로 target_date 전후 영어 뉴스 조회"""
-    if not news_api_key:
+def get_historical_news(ticker: str, target_date: str, finnhub_api_key: str, days_before: int = 14) -> list[dict]:
+    """Finnhub으로 target_date 전후 영어 뉴스 조회"""
+    if not finnhub_api_key:
         return []
     try:
         dt   = datetime.strptime(target_date, "%Y-%m-%d")
         frm  = (dt - timedelta(days=days_before)).strftime("%Y-%m-%d")
         to   = dt.strftime("%Y-%m-%d")
-        company_name = ticker.replace("=", "").replace("^", "")
-        url = "https://newsapi.org/v2/everything"
+        clean_ticker = ticker.replace("=", "").replace("^", "")
+        url = "https://finnhub.io/api/v1/company-news"
         params = {
-            "q":        f"{company_name} stock",
-            "from":     frm,
-            "to":       to,
-            "language": "en",
-            "sortBy":   "publishedAt",
-            "pageSize": 20,
-            "apiKey":   news_api_key,
+            "symbol": clean_ticker,
+            "from":   frm,
+            "to":     to,
+            "token":  finnhub_api_key,
         }
         resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
-        articles = resp.json().get("articles", [])
+        articles = resp.json() if isinstance(resp.json(), list) else []
         result = []
-        for a in articles:
+        for a in articles[:20]:
             result.append({
-                "title":        a.get("title", ""),
-                "summary":      a.get("description", "") or a.get("content", "")[:200],
+                "title":        a.get("headline", ""),
+                "summary":      a.get("summary", ""),
                 "url":          a.get("url", ""),
-                "source":       a.get("source", {}).get("name", ""),
-                "published_at": a.get("publishedAt", ""),
+                "source":       a.get("source", ""),
+                "published_at": a.get("datetime", ""),
             })
         return result
     except Exception:
@@ -179,7 +176,7 @@ def get_historical_news(ticker: str, target_date: str, news_api_key: str, days_b
 def get_full_historical_context(
     tickers: list[str],
     target_date: str,
-    news_api_key: str = "",
+    finnhub_api_key: str = "",
 ) -> dict:
     """
     target_date 기준 전체 컨텍스트 수집
@@ -187,7 +184,7 @@ def get_full_historical_context(
     - prices: 각 종목 종가
     - charts: 각 종목 3개월 OHLCV
     - fundamentals: 각 종목 펀더멘털
-    - news: 각 종목 영어 뉴스 (NewsAPI)
+    - news: 각 종목 영어 뉴스 (Finnhub)
     """
     macro  = get_historical_macro(target_date)
     prices = get_historical_prices(tickers, target_date)
@@ -198,8 +195,8 @@ def get_full_historical_context(
     for ticker in tickers:
         charts[ticker]       = get_historical_chart(ticker, target_date, months=3)
         fundamentals[ticker] = get_historical_fundamentals(ticker, target_date)
-        if news_api_key:
-            news[ticker] = get_historical_news(ticker, target_date, news_api_key)
+        if finnhub_api_key:
+            news[ticker] = get_historical_news(ticker, target_date, finnhub_api_key)
 
     return {
         "target_date":   target_date,

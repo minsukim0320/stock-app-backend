@@ -9,7 +9,7 @@ router = APIRouter(prefix="/backtest", tags=["backtest"])
 class HistoricalContextRequest(BaseModel):
     tickers: list[str]
     target_date: str          # yyyy-MM-dd
-    news_api_key: str = ""
+    finnhub_api_key: str = ""
 
 
 @router.post("/historical-context")
@@ -20,12 +20,12 @@ def historical_context(req: HistoricalContextRequest):
     - 각 종목 종가
     - 각 종목 3개월 OHLCV 차트
     - 각 종목 펀더멘털
-    - 각 종목 영어 뉴스 (NewsAPI 키 제공 시)
+    - 각 종목 영어 뉴스 (Finnhub 키 제공 시)
     """
     return get_full_historical_context(
         tickers=req.tickers,
         target_date=req.target_date,
-        news_api_key=req.news_api_key,
+        finnhub_api_key=req.finnhub_api_key,
     )
 
 
