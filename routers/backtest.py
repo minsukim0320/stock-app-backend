@@ -13,16 +13,16 @@ class HistoricalContextRequest(BaseModel):
 
 
 @router.post("/historical-context")
-def historical_context(req: HistoricalContextRequest):
+async def historical_context(req: HistoricalContextRequest):
     """
-    target_date 기준 백테스팅용 컨텍스트 수집
+    target_date 기준 백테스팅용 컨텍스트 수집 — asyncio.gather 병렬화
     - 매크로 지표 (VIX, TNX, KRW/USD, 금, 유가)
     - 각 종목 종가
     - 각 종목 3개월 OHLCV 차트
     - 각 종목 펀더멘털
     - 각 종목 영어 뉴스 (Finnhub 키 제공 시)
     """
-    return get_full_historical_context(
+    return await get_full_historical_context(
         tickers=req.tickers,
         target_date=req.target_date,
         finnhub_api_key=req.finnhub_api_key,

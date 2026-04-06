@@ -2,6 +2,7 @@
 과거 특정 날짜 기준의 데이터를 수집하는 서비스
 백테스팅 시뮬레이션용 - 해당 시점에 존재했던 데이터만 사용 (look-ahead bias 방지)
 """
+import asyncio
 import yfinance as yf
 import requests
 from datetime import datetime, timedelta
@@ -204,34 +205,70 @@ def get_historical_international_news(target_date: str, finnhub_api_key: str, da
         return []
 
 
-def get_full_historical_context(
+async def get_full_historical_context(
     tickers: list[str],
     target_date: str,
     finnhub_api_key: str = "",
 ) -> dict:
     """
-    target_date 기준 전체 컨텍스트 수집
+    target_date 기준 전체 컨텍스트 수집 — asyncio.gather로 병렬화
     - macro: VIX, TNX, KRW/USD, 금, 유가 등
     - prices: 각 종목 종가
     - charts: 각 종목 3개월 OHLCV
     - fundamentals: 각 종목 펀더멘털
     - news: 각 종목 영어 뉴스 (Finnhub)
     """
-    macro  = get_historical_macro(target_date)
-    prices = get_historical_prices(tickers, target_date)
-    charts = {}
-    fundamentals = {}
-    news = {}
+    has_finnhub = bool(finnhub_api_key)
 
+    # 매크로: 8개 티커 병렬
+    async def _macro_one(key, ticker):
+        price = await asyncio.to_thread(_nearest_close, ticker, target_date)
+        return key, price
+
+    macro_results = await asyncio.gather(
+        *[_macro_one(k, t) for k, t in MACRO_TICKERS.items()],
+        return_exceptions=True,
+    )
+    macro = {}
+    for r in macro_results:
+        if isinstance(r, Exception): continue
+        k, price = r
+        if price is not None:
+            macro[k] = price
+
+    # 종목별: 가격·차트·펀더멘털·뉴스 전 종목 동시
+    async def _ticker_data(ticker):
+        price = await asyncio.to_thread(_nearest_close, ticker, target_date)
+        chart = await asyncio.to_thread(get_historical_chart, ticker, target_date, 3)
+        fund  = await asyncio.to_thread(get_historical_fundamentals, ticker, target_date)
+        news_list = []
+        if has_finnhub:
+            news_list = await asyncio.to_thread(
+                get_historical_news, ticker, target_date, finnhub_api_key
+            )
+        return ticker, price, chart, fund, news_list
+
+    ticker_results = await asyncio.gather(
+        *[_ticker_data(t) for t in tickers],
+        return_exceptions=True,
+    )
+
+    prices, charts, fundamentals, news = {}, {}, {}, {}
+    for r in ticker_results:
+        if isinstance(r, Exception): continue
+        ticker, price, chart, fund, news_list = r
+        if price is not None:
+            prices[ticker] = price
+        charts[ticker] = chart
+        fundamentals[ticker] = fund
+        news[ticker] = news_list
+
+    # 국제 정세 뉴스
     intl_news = []
-    if finnhub_api_key:
-        intl_news = get_historical_international_news(target_date, finnhub_api_key)
-
-    for ticker in tickers:
-        charts[ticker]       = get_historical_chart(ticker, target_date, months=3)
-        fundamentals[ticker] = get_historical_fundamentals(ticker, target_date)
-        if finnhub_api_key:
-            news[ticker] = get_historical_news(ticker, target_date, finnhub_api_key)
+    if has_finnhub:
+        intl_news = await asyncio.to_thread(
+            get_historical_international_news, target_date, finnhub_api_key
+        )
 
     return {
         "target_date":   target_date,
