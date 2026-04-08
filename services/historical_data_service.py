@@ -3,6 +3,8 @@
 백테스팅 시뮬레이션용 - 해당 시점에 존재했던 데이터만 사용 (look-ahead bias 방지)
 """
 import asyncio
+import threading
+import pandas as pd
 import yfinance as yf
 import requests
 from datetime import datetime, timedelta
@@ -21,26 +23,154 @@ MACRO_TICKERS = {
 }
 
 
+_yf_lock = threading.Lock()
+
+
+def _yf_download(ticker: str, start: str, end: str, timeout_sec: int = 30) -> pd.DataFrame:
+    """yfinance download with timeout protection, MultiIndex flattening, and thread-safety lock"""
+    try:
+        with _yf_lock:
+            df = yf.download(ticker, start=start, end=end,
+                             progress=False, auto_adjust=True, timeout=timeout_sec)
+        if df.empty:
+            return df
+        # MultiIndex 평탄화 (단일 티커인데 MultiIndex 반환되는 경우)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(1)
+        return df
+    except Exception as e:
+        print(f"[ERROR] yf.download({ticker}, {start}~{end}) failed: {e}")
+        return pd.DataFrame()
+
+
+def _safe_float(val) -> float:
+    """pandas scalar/Series → float 안전 변환"""
+    if hasattr(val, "item"):
+        return float(val.item())
+    return float(val)
+
+
 def _nearest_close(ticker: str, target_date: str) -> Optional[float]:
     """target_date 이전 가장 가까운 거래일 종가 반환"""
     try:
         dt = datetime.strptime(target_date, "%Y-%m-%d")
-        start = (dt - timedelta(days=10)).strftime("%Y-%m-%d")
+        start = (dt - timedelta(days=14)).strftime("%Y-%m-%d")
         end   = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
-        df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)
+        df = _yf_download(ticker, start, end)
         if df.empty:
+            print(f"[WARN] No price data for {ticker} near {target_date}")
             return None
-        # target_date 이하 날짜 중 가장 최근
         filtered = df[df.index <= dt]
         if filtered.empty:
             return None
         close_val = filtered["Close"].iloc[-1]
-        # pandas scalar → float
-        if hasattr(close_val, "item"):
-            return round(float(close_val.item()), 4)
-        return round(float(close_val), 4)
-    except Exception:
+        return round(_safe_float(close_val), 4)
+    except Exception as e:
+        print(f"[ERROR] _nearest_close({ticker}, {target_date}): {e}")
         return None
+
+
+def _batch_nearest_closes(tickers, target_date: str) -> dict:
+    """
+    여러 종목의 종가를 단일 yf.download 배치 호출로 수집 (thread-safe).
+    tickers: dict {label: yf_ticker} (매크로용) 또는 list[str] (종목용)
+    """
+    if isinstance(tickers, dict):
+        labels = list(tickers.keys())
+        yf_tickers = list(tickers.values())
+    else:
+        labels = list(tickers)
+        yf_tickers = list(tickers)
+
+    if not yf_tickers:
+        return {}
+
+    dt = datetime.strptime(target_date, "%Y-%m-%d")
+    start = (dt - timedelta(days=14)).strftime("%Y-%m-%d")
+    end = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    try:
+        with _yf_lock:
+            df = yf.download(yf_tickers, start=start, end=end,
+                             progress=False, auto_adjust=True, timeout=30)
+    except Exception as e:
+        print(f"[ERROR] batch yf.download({yf_tickers}) failed: {e}")
+        return {label: None for label in labels}
+
+    if df.empty:
+        return {label: None for label in labels}
+
+    is_multi = isinstance(df.columns, pd.MultiIndex)
+    result = {}
+    for label, yf_ticker in zip(labels, yf_tickers):
+        try:
+            if len(yf_tickers) == 1 and not is_multi:
+                close_series = df["Close"]
+            else:
+                close_series = df[("Close", yf_ticker)]
+
+            filtered = close_series[close_series.index <= dt].dropna()
+            if filtered.empty:
+                result[label] = None
+            else:
+                result[label] = round(_safe_float(filtered.iloc[-1]), 4)
+        except Exception as e:
+            print(f"[WARN] batch close extraction failed for {label}/{yf_ticker}: {e}")
+            result[label] = None
+
+    return result
+
+
+def _batch_historical_charts(tickers: list, target_date: str, months: int = 3) -> dict:
+    """
+    여러 종목의 OHLCV 차트를 단일 yf.download 배치 호출로 수집 (thread-safe).
+    """
+    if not tickers:
+        return {}
+
+    dt = datetime.strptime(target_date, "%Y-%m-%d")
+    end = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
+    start = (dt - timedelta(days=months * 31)).strftime("%Y-%m-%d")
+
+    try:
+        with _yf_lock:
+            df = yf.download(list(tickers), start=start, end=end,
+                             progress=False, auto_adjust=True, timeout=60)
+    except Exception as e:
+        print(f"[ERROR] batch chart yf.download({tickers}) failed: {e}")
+        return {t: [] for t in tickers}
+
+    if df.empty:
+        return {t: [] for t in tickers}
+
+    is_multi = isinstance(df.columns, pd.MultiIndex)
+    result = {}
+    for ticker in tickers:
+        try:
+            if len(tickers) == 1 and not is_multi:
+                ticker_df = df
+            else:
+                ticker_df = df.xs(ticker, level=1, axis=1) if is_multi else df
+
+            chart = []
+            for date, row in ticker_df.iterrows():
+                try:
+                    chart.append({
+                        "date":   date.strftime("%Y-%m-%d"),
+                        "open":   round(_safe_float(row["Open"]), 2),
+                        "high":   round(_safe_float(row["High"]), 2),
+                        "low":    round(_safe_float(row["Low"]), 2),
+                        "close":  round(_safe_float(row["Close"]), 2),
+                        "volume": int(_safe_float(row["Volume"])),
+                    })
+                except Exception:
+                    continue
+            result[ticker] = chart
+        except Exception as e:
+            print(f"[WARN] batch chart extraction failed for {ticker}: {e}")
+            result[ticker] = []
+
+    return result
 
 
 def get_historical_macro(target_date: str) -> dict:
@@ -69,36 +199,44 @@ def get_historical_chart(ticker: str, target_date: str, months: int = 3) -> list
         dt  = datetime.strptime(target_date, "%Y-%m-%d")
         end = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
         start = (dt - timedelta(days=months * 31)).strftime("%Y-%m-%d")
-        df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)
+        df = _yf_download(ticker, start, end)
         if df.empty:
+            print(f"[WARN] No chart data for {ticker} ({start}~{end})")
             return []
         result = []
         for date, row in df.iterrows():
-            result.append({
-                "date":   date.strftime("%Y-%m-%d"),
-                "open":   round(float(row["Open"].item() if hasattr(row["Open"], "item") else row["Open"]), 2),
-                "high":   round(float(row["High"].item() if hasattr(row["High"], "item") else row["High"]), 2),
-                "low":    round(float(row["Low"].item()  if hasattr(row["Low"],  "item") else row["Low"]),  2),
-                "close":  round(float(row["Close"].item() if hasattr(row["Close"], "item") else row["Close"]), 2),
-                "volume": int(row["Volume"].item() if hasattr(row["Volume"], "item") else row["Volume"]),
-            })
+            try:
+                result.append({
+                    "date":   date.strftime("%Y-%m-%d"),
+                    "open":   round(_safe_float(row["Open"]), 2),
+                    "high":   round(_safe_float(row["High"]), 2),
+                    "low":    round(_safe_float(row["Low"]), 2),
+                    "close":  round(_safe_float(row["Close"]), 2),
+                    "volume": int(_safe_float(row["Volume"])),
+                })
+            except Exception as e:
+                print(f"[WARN] Chart row parse error for {ticker} on {date}: {e}")
+                continue
         return result
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] get_historical_chart({ticker}, {target_date}): {e}")
         return []
 
 
 def get_historical_fundamentals(ticker: str, target_date: str) -> dict:
     """target_date 이전 가장 최근 분기 재무제표 기반 펀더멘털"""
     try:
-        stock = yf.Ticker(ticker)
-        info  = stock.info  # 현재 기준이지만 P/E 등은 yfinance에서 과거 분기 미제공
-        # yfinance는 현재 info만 제공하므로 재무제표로 근사치 계산
+        with _yf_lock:
+            stock = yf.Ticker(ticker)
+            info  = stock.info
+            try:
+                qf = stock.quarterly_financials
+            except Exception:
+                qf = None
         dt = datetime.strptime(target_date, "%Y-%m-%d")
 
-        # 분기 EPS (target_date 이전 가장 최근 분기)
         trailing_eps = None
         try:
-            qf = stock.quarterly_financials
             if qf is not None and not qf.empty:
                 past_cols = [c for c in qf.columns if c.to_pydatetime().replace(tzinfo=None) <= dt]
                 if past_cols:
@@ -137,13 +275,15 @@ def get_historical_fundamentals(ticker: str, target_date: str) -> dict:
             "market_cap":        info.get("marketCap"),
             "_note": "fundamentals_approximate_current_values",
         }
-    except Exception:
+    except Exception as e:
+        print(f"[WARN] Fundamentals failed for {ticker}: {e}")
         return {"ticker": ticker.upper()}
 
 
 def get_historical_news(ticker: str, target_date: str, finnhub_api_key: str, days_before: int = 14) -> list[dict]:
     """Finnhub으로 target_date 전후 영어 뉴스 조회"""
     if not finnhub_api_key:
+        print(f"[WARN] Finnhub API key empty — skipping news for {ticker}")
         return []
     try:
         dt   = datetime.strptime(target_date, "%Y-%m-%d")
@@ -158,8 +298,18 @@ def get_historical_news(ticker: str, target_date: str, finnhub_api_key: str, day
             "token":  finnhub_api_key,
         }
         resp = requests.get(url, params=params, timeout=10)
+        if resp.status_code == 429:
+            print(f"[WARN] Finnhub rate limit (429) for {ticker} — retrying after 3s")
+            import time
+            time.sleep(3)
+            resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
-        articles = resp.json() if isinstance(resp.json(), list) else []
+        raw = resp.json()
+        if not isinstance(raw, list):
+            print(f"[WARN] Finnhub returned non-list for {ticker}: {type(raw).__name__}")
+            return []
+        articles = raw
+        print(f"[INFO] Finnhub news for {ticker}: {len(articles)} articles")
         result = []
         for a in articles[:20]:
             result.append({
@@ -170,7 +320,8 @@ def get_historical_news(ticker: str, target_date: str, finnhub_api_key: str, day
                 "published_at": a.get("datetime", ""),
             })
         return result
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] Finnhub news failed for {ticker}: {e}")
         return []
 
 
@@ -201,7 +352,8 @@ def get_historical_international_news(target_date: str, finnhub_api_key: str, da
                 "published_at": a.get("datetime", ""),
             })
         return result
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] International news failed: {e}")
         return []
 
 
@@ -211,64 +363,86 @@ async def get_full_historical_context(
     finnhub_api_key: str = "",
 ) -> dict:
     """
-    target_date 기준 전체 컨텍스트 수집 — asyncio.gather로 병렬화
-    - macro: VIX, TNX, KRW/USD, 금, 유가 등
-    - prices: 각 종목 종가
-    - charts: 각 종목 3개월 OHLCV
-    - fundamentals: 각 종목 펀더멘털
-    - news: 각 종목 영어 뉴스 (Finnhub)
+    target_date 기준 전체 컨텍스트 수집.
+    yf.download 배치 호출로 thread-safety 확보 + 성능 최적화.
     """
     has_finnhub = bool(finnhub_api_key)
+    if not has_finnhub:
+        print(f"[WARN] No Finnhub API key provided — news will be skipped for all tickers")
 
-    # 매크로: 8개 티커 병렬
-    async def _macro_one(key, ticker):
-        price = await asyncio.to_thread(_nearest_close, ticker, target_date)
-        return key, price
+    # ── Phase 1: 배치 yf.download (매크로 + 종목가격 + 차트) ──────────
+    # 각 배치 함수가 내부적으로 _yf_lock을 사용하므로 순차 실행되지만,
+    # asyncio.to_thread로 감싸서 이벤트 루프를 블로킹하지 않음
+    macro_future = asyncio.to_thread(_batch_nearest_closes, MACRO_TICKERS, target_date)
+    prices_future = asyncio.to_thread(_batch_nearest_closes, tickers, target_date)
+    charts_future = asyncio.to_thread(_batch_historical_charts, tickers, target_date, 3)
 
-    macro_results = await asyncio.gather(
-        *[_macro_one(k, t) for k, t in MACRO_TICKERS.items()],
-        return_exceptions=True,
-    )
-    macro = {}
-    for r in macro_results:
-        if isinstance(r, Exception): continue
-        k, price = r
-        if price is not None:
-            macro[k] = price
-
-    # 종목별: 가격·차트·펀더멘털·뉴스 전 종목 동시
-    async def _ticker_data(ticker):
-        price = await asyncio.to_thread(_nearest_close, ticker, target_date)
-        chart = await asyncio.to_thread(get_historical_chart, ticker, target_date, 3)
-        fund  = await asyncio.to_thread(get_historical_fundamentals, ticker, target_date)
-        news_list = []
-        if has_finnhub:
-            news_list = await asyncio.to_thread(
-                get_historical_news, ticker, target_date, finnhub_api_key
-            )
-        return ticker, price, chart, fund, news_list
-
-    ticker_results = await asyncio.gather(
-        *[_ticker_data(t) for t in tickers],
+    batch_results = await asyncio.gather(
+        macro_future, prices_future, charts_future,
         return_exceptions=True,
     )
 
-    prices, charts, fundamentals, news = {}, {}, {}, {}
-    for r in ticker_results:
-        if isinstance(r, Exception): continue
-        ticker, price, chart, fund, news_list = r
-        if price is not None:
-            prices[ticker] = price
-        charts[ticker] = chart
-        fundamentals[ticker] = fund
-        news[ticker] = news_list
+    # 매크로
+    if isinstance(batch_results[0], Exception):
+        print(f"[ERROR] Macro batch failed: {batch_results[0]}")
+        macro = {}
+    else:
+        macro = {k: v for k, v in batch_results[0].items() if v is not None}
+
+    # 종목 가격
+    if isinstance(batch_results[1], Exception):
+        print(f"[ERROR] Prices batch failed: {batch_results[1]}")
+        prices = {}
+    else:
+        prices = {k: v for k, v in batch_results[1].items() if v is not None}
+        for t in tickers:
+            if t not in prices:
+                print(f"[WARN] No price for {t} on {target_date}")
+
+    # 차트
+    if isinstance(batch_results[2], Exception):
+        print(f"[ERROR] Charts batch failed: {batch_results[2]}")
+        charts = {t: [] for t in tickers}
+    else:
+        charts = batch_results[2]
+
+    print(f"[INFO] Macro collected: {list(macro.keys())} ({len(macro)}/{len(MACRO_TICKERS)})")
+    print(f"[INFO] Prices: {len(prices)}/{len(tickers)}, "
+          f"Charts: {sum(1 for c in charts.values() if c)}/{len(tickers)}")
+
+    # ── Phase 2: 펀더멘털 (yf.Ticker — Lock 보호, 순차) ──────────────
+    fundamentals = {}
+    for ticker in tickers:
+        try:
+            fund = await asyncio.to_thread(get_historical_fundamentals, ticker, target_date)
+            fundamentals[ticker] = fund
+        except Exception as e:
+            print(f"[ERROR] Fundamentals for {ticker}: {e}")
+            fundamentals[ticker] = {"ticker": ticker.upper()}
+
+    # ── Phase 3: Finnhub 뉴스 (순차, rate limit 보호) ─────────────────
+    news = {t: [] for t in tickers}
+    if has_finnhub:
+        for ticker in tickers:
+            try:
+                nl = await asyncio.to_thread(
+                    get_historical_news, ticker, target_date, finnhub_api_key
+                )
+                news[ticker] = nl
+                await asyncio.sleep(0.5)  # rate limit 보호
+            except Exception as e:
+                print(f"[ERROR] News fetch for {ticker}: {e}")
+                news[ticker] = []
 
     # 국제 정세 뉴스
     intl_news = []
     if has_finnhub:
-        intl_news = await asyncio.to_thread(
-            get_historical_international_news, target_date, finnhub_api_key
-        )
+        try:
+            intl_news = await asyncio.to_thread(
+                get_historical_international_news, target_date, finnhub_api_key
+            )
+        except Exception as e:
+            print(f"[ERROR] International news fetch failed: {e}")
 
     return {
         "target_date":   target_date,

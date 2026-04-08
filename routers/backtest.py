@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 from typing import Optional
-from services.historical_data_service import get_full_historical_context, get_historical_chart
+from services.historical_data_service import get_full_historical_context, get_historical_chart, _yf_download, _safe_float
 
 router = APIRouter(prefix="/backtest", tags=["backtest"])
 
@@ -16,11 +16,6 @@ class HistoricalContextRequest(BaseModel):
 async def historical_context(req: HistoricalContextRequest):
     """
     target_date 기준 백테스팅용 컨텍스트 수집 — asyncio.gather 병렬화
-    - 매크로 지표 (VIX, TNX, KRW/USD, 금, 유가)
-    - 각 종목 종가
-    - 각 종목 3개월 OHLCV 차트
-    - 각 종목 펀더멘털
-    - 각 종목 영어 뉴스 (Finnhub 키 제공 시)
     """
     return await get_full_historical_context(
         tickers=req.tickers,
@@ -39,27 +34,32 @@ def forward_chart(
     from_date 이후 실제 주가 데이터 반환 — 목표가/손절가 도달 여부 시뮬레이션용
     """
     from datetime import datetime, timedelta
-    import yfinance as yf
 
     try:
         dt    = datetime.strptime(from_date, "%Y-%m-%d")
         start = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
-        end   = (dt + timedelta(days=days * 2)).strftime("%Y-%m-%d")  # 거래일 기준이므로 여유 있게
-        df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)
+        end   = (dt + timedelta(days=days * 2)).strftime("%Y-%m-%d")
+        df = _yf_download(ticker, start, end, timeout_sec=30)
         if df.empty:
+            print(f"[WARN] forward_chart: no data for {ticker} from {from_date}")
             return []
         result = []
         for date, row in df.iterrows():
-            result.append({
-                "date":   date.strftime("%Y-%m-%d"),
-                "open":   round(float(row["Open"].item()   if hasattr(row["Open"],   "item") else row["Open"]),   2),
-                "high":   round(float(row["High"].item()   if hasattr(row["High"],   "item") else row["High"]),   2),
-                "low":    round(float(row["Low"].item()    if hasattr(row["Low"],    "item") else row["Low"]),    2),
-                "close":  round(float(row["Close"].item()  if hasattr(row["Close"],  "item") else row["Close"]),  2),
-                "volume": int(row["Volume"].item() if hasattr(row["Volume"], "item") else row["Volume"]),
-            })
+            try:
+                result.append({
+                    "date":   date.strftime("%Y-%m-%d"),
+                    "open":   round(_safe_float(row["Open"]), 2),
+                    "high":   round(_safe_float(row["High"]), 2),
+                    "low":    round(_safe_float(row["Low"]), 2),
+                    "close":  round(_safe_float(row["Close"]), 2),
+                    "volume": int(_safe_float(row["Volume"])),
+                })
+            except Exception as e:
+                print(f"[WARN] forward_chart row parse error for {ticker}: {e}")
+                continue
         return result[:days]
     except Exception as e:
+        print(f"[ERROR] forward_chart({ticker}, {from_date}): {e}")
         return []
 
 
@@ -72,21 +72,26 @@ def forward_forex(
     from_date 이후 KRW/USD 환율 데이터 반환 — P&L 환율 반영용
     """
     from datetime import datetime, timedelta
-    import yfinance as yf
 
     try:
         dt    = datetime.strptime(from_date, "%Y-%m-%d")
         start = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
         end   = (dt + timedelta(days=days * 2)).strftime("%Y-%m-%d")
-        df = yf.download("KRW=X", start=start, end=end, progress=False, auto_adjust=True)
+        df = _yf_download("KRW=X", start, end, timeout_sec=30)
         if df.empty:
+            print(f"[WARN] forward_forex: no data for KRW=X from {from_date}")
             return []
         result = []
         for date, row in df.iterrows():
-            result.append({
-                "date":  date.strftime("%Y-%m-%d"),
-                "rate":  round(float(row["Close"].item() if hasattr(row["Close"], "item") else row["Close"]), 2),
-            })
+            try:
+                result.append({
+                    "date":  date.strftime("%Y-%m-%d"),
+                    "rate":  round(_safe_float(row["Close"]), 2),
+                })
+            except Exception as e:
+                print(f"[WARN] forward_forex row parse error: {e}")
+                continue
         return result[:days]
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] forward_forex({from_date}): {e}")
         return []
