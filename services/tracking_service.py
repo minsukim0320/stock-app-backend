@@ -74,3 +74,16 @@ def save_reliability(device_id: str, reliability: dict) -> dict:
     data["reliability"] = reliability
     save_data(device_id, data)
     return {"ok": True}
+
+
+def clear_all(device_id: str) -> dict:
+    """디바이스의 모든 추천/신뢰도 데이터 삭제"""
+    _ensure_dir()
+    path = _file_path(device_id)
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+            return {"ok": True, "removed": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+    return {"ok": True, "removed": False}

@@ -7,6 +7,7 @@ from services.tracking_service import (
     update_recommendation,
     get_reliability,
     save_reliability,
+    clear_all,
 )
 
 router = APIRouter(prefix="/tracking", tags=["tracking"])
@@ -69,3 +70,9 @@ def get_reliability_summary(device_id: str):
 @router.post("/{device_id}/reliability")
 def post_reliability_summary(device_id: str, body: ReliabilityBody):
     return save_reliability(device_id, body.model_dump())
+
+
+@router.delete("/{device_id}")
+def delete_tracking_data(device_id: str):
+    """디바이스의 모든 추천/신뢰도 데이터 삭제"""
+    return clear_all(device_id)
