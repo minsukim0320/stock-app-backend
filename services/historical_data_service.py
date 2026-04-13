@@ -9,6 +9,7 @@ import yfinance as yf
 import requests
 from datetime import datetime, timedelta
 from typing import Optional
+from services.news_utils import deduplicate_news, format_news_for_prompt
 
 # 매크로 지표 티커
 MACRO_TICKERS = {
@@ -51,16 +52,16 @@ def _safe_float(val) -> float:
 
 
 def _nearest_close(ticker: str, target_date: str) -> Optional[float]:
-    """target_date 이전 가장 가까운 거래일 종가 반환"""
+    """target_date 전일(직전 거래일) 종가 반환 — look-ahead bias 방지"""
     try:
         dt = datetime.strptime(target_date, "%Y-%m-%d")
         start = (dt - timedelta(days=14)).strftime("%Y-%m-%d")
-        end   = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
+        end   = target_date  # target_date 미포함 (전일까지만)
         df = _yf_download(ticker, start, end)
         if df.empty:
-            print(f"[WARN] No price data for {ticker} near {target_date}")
+            print(f"[WARN] No price data for {ticker} before {target_date}")
             return None
-        filtered = df[df.index <= dt]
+        filtered = df[df.index < dt].dropna()
         if filtered.empty:
             return None
         close_val = filtered["Close"].iloc[-1]
@@ -87,7 +88,7 @@ def _batch_nearest_closes(tickers, target_date: str) -> dict:
 
     dt = datetime.strptime(target_date, "%Y-%m-%d")
     start = (dt - timedelta(days=14)).strftime("%Y-%m-%d")
-    end = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
+    end = target_date  # target_date 미포함 (전일까지만 — look-ahead bias 방지)
 
     try:
         with _yf_lock:
@@ -109,7 +110,7 @@ def _batch_nearest_closes(tickers, target_date: str) -> dict:
             else:
                 close_series = df[("Close", yf_ticker)]
 
-            filtered = close_series[close_series.index <= dt].dropna()
+            filtered = close_series[close_series.index < dt].dropna()
             if filtered.empty:
                 result[label] = None
             else:
@@ -129,7 +130,7 @@ def _batch_historical_charts(tickers: list, target_date: str, months: int = 3) -
         return {}
 
     dt = datetime.strptime(target_date, "%Y-%m-%d")
-    end = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
+    end = target_date  # target_date 미포함 (전일까지만 — look-ahead bias 방지)
     start = (dt - timedelta(days=months * 31)).strftime("%Y-%m-%d")
 
     try:
@@ -194,10 +195,10 @@ def get_historical_prices(tickers: list[str], target_date: str) -> dict:
 
 
 def get_historical_chart(ticker: str, target_date: str, months: int = 3) -> list[dict]:
-    """target_date 기준 이전 months개월 OHLCV 차트 (선견지명 방지)"""
+    """target_date 기준 이전 months개월 OHLCV 차트 (look-ahead bias 방지)"""
     try:
         dt  = datetime.strptime(target_date, "%Y-%m-%d")
-        end = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
+        end = target_date  # target_date 미포함 (전일까지만)
         start = (dt - timedelta(days=months * 31)).strftime("%Y-%m-%d")
         df = _yf_download(ticker, start, end)
         if df.empty:
@@ -311,7 +312,7 @@ def get_historical_news(ticker: str, target_date: str, finnhub_api_key: str, day
         articles = raw
         print(f"[INFO] Finnhub news for {ticker}: {len(articles)} articles")
         result = []
-        for a in articles[:20]:
+        for a in articles[:30]:
             result.append({
                 "title":        a.get("headline", ""),
                 "summary":      a.get("summary", ""),
@@ -319,7 +320,8 @@ def get_historical_news(ticker: str, target_date: str, finnhub_api_key: str, day
                 "source":       a.get("source", ""),
                 "published_at": a.get("datetime", ""),
             })
-        return result
+        deduped = deduplicate_news(result)
+        return format_news_for_prompt(deduped[:20])
     except Exception as e:
         print(f"[ERROR] Finnhub news failed for {ticker}: {e}")
         return []
@@ -343,7 +345,7 @@ def get_historical_international_news(target_date: str, finnhub_api_key: str, da
         resp.raise_for_status()
         articles = resp.json() if isinstance(resp.json(), list) else []
         result = []
-        for a in articles[:30]:
+        for a in articles[:50]:
             result.append({
                 "title":        a.get("headline", ""),
                 "summary":      a.get("summary", ""),
@@ -351,7 +353,8 @@ def get_historical_international_news(target_date: str, finnhub_api_key: str, da
                 "source":       a.get("source", ""),
                 "published_at": a.get("datetime", ""),
             })
-        return result
+        deduped = deduplicate_news(result)
+        return format_news_for_prompt(deduped[:30])
     except Exception as e:
         print(f"[ERROR] International news failed: {e}")
         return []
