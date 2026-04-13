@@ -1,7 +1,12 @@
+import asyncio
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 from typing import Optional
-from services.historical_data_service import get_full_historical_context, get_historical_chart, _yf_download, _safe_float
+from services.historical_data_service import (
+    get_full_historical_context, get_historical_chart,
+    get_historical_news, get_historical_international_news,
+    _yf_download, _safe_float,
+)
 
 router = APIRouter(prefix="/backtest", tags=["backtest"])
 
@@ -22,6 +27,36 @@ async def historical_context(req: HistoricalContextRequest):
         target_date=req.target_date,
         finnhub_api_key=req.finnhub_api_key,
     )
+
+
+class HistoricalNewsRequest(BaseModel):
+    tickers: list[str]
+    target_date: str
+    finnhub_api_key: str = ""
+
+
+@router.post("/historical-news")
+async def historical_news(req: HistoricalNewsRequest):
+    """
+    target_date 기준 Finnhub 영어 뉴스만 경량 조회 (차트·펀더멘털 제외).
+    sector universe 보조 종목용 — SectorAnalyst 헤드라인 입력에 사용.
+    """
+    if not req.finnhub_api_key:
+        return {"news": {t: [] for t in req.tickers}, "intl_news": []}
+
+    news = {}
+    for ticker in req.tickers:
+        try:
+            nl = await asyncio.to_thread(
+                get_historical_news, ticker, req.target_date, req.finnhub_api_key
+            )
+            news[ticker] = nl
+            await asyncio.sleep(0.3)  # rate limit 보호
+        except Exception as e:
+            print(f"[ERROR] historical-news {ticker}: {e}")
+            news[ticker] = []
+
+    return {"news": news}
 
 
 @router.get("/forward-chart/{ticker}")

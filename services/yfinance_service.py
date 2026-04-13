@@ -10,14 +10,31 @@ ECONOMY_KEYWORDS = [
 
 
 def get_stock_price(ticker: str) -> dict:
+    from datetime import datetime, timezone
     stock = yf.Ticker(ticker)
     info = stock.fast_info
+
+    # yfinance free tier는 15분 지연 가능 → 마지막 1분봉의 timestamp와
+    # 현재 UTC 시각 차이로 대략적인 delay를 계산해 반환 (클라이언트 stale 표시용)
+    delay_minutes = None
+    try:
+        hist = stock.history(period="1d", interval="1m")
+        if not hist.empty:
+            last_ts = hist.index[-1].to_pydatetime()
+            if last_ts.tzinfo is None:
+                last_ts = last_ts.replace(tzinfo=timezone.utc)
+            delta = datetime.now(timezone.utc) - last_ts
+            delay_minutes = max(0, int(delta.total_seconds() // 60))
+    except Exception:
+        pass
+
     return {
         "ticker": ticker.upper(),
         "price": round(info.last_price, 2),
         "change": round(info.last_price - info.previous_close, 2),
         "change_percent": round((info.last_price - info.previous_close) / info.previous_close * 100, 2),
         "currency": info.currency,
+        "delay_minutes": delay_minutes,
     }
 
 
