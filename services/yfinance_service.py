@@ -14,13 +14,30 @@ def get_stock_price(ticker: str) -> dict:
     stock = yf.Ticker(ticker)
     info = stock.fast_info
 
+    last_price = getattr(info, "last_price", None)
+    prev_close = getattr(info, "previous_close", None)
+    currency = getattr(info, "currency", None)
+
+    # fast_info 실패 시 history fallback
+    if last_price is None or prev_close is None:
+        hist = stock.history(period="5d")
+        if hist.empty:
+            raise Exception(f"{ticker}: 주가 데이터를 가져올 수 없습니다 (fast_info 및 history 모두 실패)")
+        last_price = float(hist["Close"].iloc[-1])
+        prev_close = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else last_price
+        if currency is None:
+            try:
+                currency = stock.info.get("currency", "USD")
+            except Exception:
+                currency = "USD"
+
     # yfinance free tier는 15분 지연 가능 → 마지막 1분봉의 timestamp와
     # 현재 UTC 시각 차이로 대략적인 delay를 계산해 반환 (클라이언트 stale 표시용)
     delay_minutes = None
     try:
-        hist = stock.history(period="1d", interval="1m")
-        if not hist.empty:
-            last_ts = hist.index[-1].to_pydatetime()
+        hist_1m = stock.history(period="1d", interval="1m")
+        if not hist_1m.empty:
+            last_ts = hist_1m.index[-1].to_pydatetime()
             if last_ts.tzinfo is None:
                 last_ts = last_ts.replace(tzinfo=timezone.utc)
             delta = datetime.now(timezone.utc) - last_ts
@@ -28,12 +45,15 @@ def get_stock_price(ticker: str) -> dict:
     except Exception:
         pass
 
+    change = last_price - prev_close
+    change_pct = (change / prev_close * 100) if prev_close else 0
+
     return {
         "ticker": ticker.upper(),
-        "price": round(info.last_price, 2),
-        "change": round(info.last_price - info.previous_close, 2),
-        "change_percent": round((info.last_price - info.previous_close) / info.previous_close * 100, 2),
-        "currency": info.currency,
+        "price": round(last_price, 2),
+        "change": round(change, 2),
+        "change_percent": round(change_pct, 2),
+        "currency": currency or "USD",
         "delay_minutes": delay_minutes,
     }
 
@@ -41,6 +61,8 @@ def get_stock_price(ticker: str) -> dict:
 def get_chart_data(ticker: str, period: str = "1mo") -> list[dict]:
     stock = yf.Ticker(ticker)
     hist = stock.history(period=period)
+    if hist.empty:
+        raise Exception(f"{ticker}: 차트 데이터가 비어있습니다 (period={period})")
     result = []
     for date, row in hist.iterrows():
         result.append({
