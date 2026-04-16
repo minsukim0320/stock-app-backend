@@ -1,9 +1,17 @@
 from fastapi import APIRouter, HTTPException
-from services.yfinance_service import get_stock_price, get_english_news, get_chart_data, get_fundamentals
+from pydantic import BaseModel
+from services.yfinance_service import (
+    get_stock_price, get_stock_prices_batch, get_english_news,
+    get_chart_data, get_fundamentals,
+)
 from services.naver_service import get_korean_news
 from services.politics_service import get_korean_politics_news, get_international_news
 
 router = APIRouter(prefix="/stocks", tags=["stocks"])
+
+
+class PricesBatchRequest(BaseModel):
+    tickers: list[str]
 
 
 @router.get("/{ticker}/price")
@@ -12,6 +20,15 @@ def stock_price(ticker: str):
         return get_stock_price(ticker)
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/prices")
+def stock_prices_batch(req: PricesBatchRequest):
+    """여러 종목 현재가 배치 조회 — 개별 호출 대비 10배+ 빠름 (Yahoo에 1번만 호출)"""
+    try:
+        return get_stock_prices_batch(req.tickers)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/{ticker}/chart")
