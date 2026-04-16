@@ -3,13 +3,18 @@
 백테스팅 시뮬레이션용 - 해당 시점에 존재했던 데이터만 사용 (look-ahead bias 방지)
 """
 import asyncio
+import os
 import threading
 import pandas as pd
 import yfinance as yf
 import requests
 from datetime import datetime, timedelta
 from typing import Optional
+from dotenv import load_dotenv
 from services.news_utils import deduplicate_news, format_news_for_prompt
+
+load_dotenv()
+SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
 
 # 매크로 지표 티커
 MACRO_TICKERS = {
@@ -352,37 +357,65 @@ def get_historical_news(ticker: str, target_date: str, finnhub_api_key: str, day
         return []
 
 
-def get_historical_international_news(target_date: str, finnhub_api_key: str, days_before: int = 14) -> list[dict]:
-    """Finnhub 일반 마켓 뉴스로 국제 정세 뉴스 조회"""
-    if not finnhub_api_key:
+def _serpapi_news_search(query: str, target_date: str, gl: str, hl: str, days_before: int = 14) -> list[dict]:
+    """
+    SerpAPI Google News (tbm=nws) — tbs 파라미터로 날짜 범위 필터링.
+    target_date 이전 days_before일 ~ target_date 사이의 뉴스만 반환.
+    """
+    if not SERPAPI_KEY:
         return []
     try:
-        dt  = datetime.strptime(target_date, "%Y-%m-%d")
-        frm = int((dt - timedelta(days=days_before)).timestamp())
-        to  = int(dt.timestamp())
-        url = "https://finnhub.io/api/v1/news"
+        dt = datetime.strptime(target_date, "%Y-%m-%d")
+        cd_min = (dt - timedelta(days=days_before)).strftime("%m/%d/%Y")
+        cd_max = dt.strftime("%m/%d/%Y")
         params = {
-            "category": "general",
-            "minId":    frm,
-            "token":    finnhub_api_key,
+            "engine": "google",
+            "tbm": "nws",
+            "q": query,
+            "tbs": f"cdr:1,cd_min:{cd_min},cd_max:{cd_max}",
+            "gl": gl,
+            "hl": hl,
+            "num": 50,
+            "api_key": SERPAPI_KEY,
         }
-        resp = requests.get(url, params=params, timeout=10)
+        resp = requests.get("https://serpapi.com/search", params=params, timeout=15)
         resp.raise_for_status()
-        articles = resp.json() if isinstance(resp.json(), list) else []
-        result = []
+        data = resp.json()
+        articles = data.get("news_results", [])
+        raw = []
         for a in articles[:50]:
-            result.append({
-                "title":        a.get("headline", ""),
-                "summary":      a.get("summary", ""),
-                "url":          a.get("url", ""),
-                "source":       a.get("source", ""),
-                "published_at": a.get("datetime", ""),
+            raw.append({
+                "title": a.get("title", ""),
+                "summary": a.get("snippet", ""),
+                "url": a.get("link", ""),
+                "source": a.get("source", "") if isinstance(a.get("source"), str) else a.get("source", {}).get("name", ""),
+                "published_at": a.get("date", ""),
             })
-        deduped = deduplicate_news(result)
+        deduped = deduplicate_news(raw)
         return format_news_for_prompt(deduped[:30])
     except Exception as e:
-        print(f"[ERROR] International news failed: {e}")
+        print(f"[ERROR] SerpAPI news search failed ({query[:30]}): {e}")
         return []
+
+
+def get_historical_international_news(target_date: str, **_kwargs) -> list[dict]:
+    """SerpAPI로 과거 국제 경제/금융 뉴스 조회 (날짜 범위 필터 적용)"""
+    return _serpapi_news_search(
+        query="global economy finance stock market",
+        target_date=target_date,
+        gl="us",
+        hl="en",
+    )
+
+
+def get_historical_korean_politics_news(target_date: str) -> list[dict]:
+    """SerpAPI로 과거 한국 경제/정세 뉴스 조회 (날짜 범위 필터 적용)"""
+    return _serpapi_news_search(
+        query="한국 경제 금융 증권",
+        target_date=target_date,
+        gl="kr",
+        hl="ko",
+    )
 
 
 async def get_full_historical_context(
@@ -462,22 +495,39 @@ async def get_full_historical_context(
                 print(f"[ERROR] News fetch for {ticker}: {e}")
                 news[ticker] = []
 
-    # 국제 정세 뉴스
+    # ── Phase 4: SerpAPI 뉴스 (국제 정세 + 한국 정세) ─────────────────
     intl_news = []
-    if has_finnhub:
+    korean_politics = []
+    has_serpapi = bool(SERPAPI_KEY)
+
+    if has_serpapi:
         try:
             intl_news = await asyncio.to_thread(
-                get_historical_international_news, target_date, finnhub_api_key
+                get_historical_international_news, target_date
             )
+            print(f"[INFO] Historical intl news: {len(intl_news)} articles")
         except Exception as e:
             print(f"[ERROR] International news fetch failed: {e}")
 
+        await asyncio.sleep(0.5)  # SerpAPI rate limit 보호
+
+        try:
+            korean_politics = await asyncio.to_thread(
+                get_historical_korean_politics_news, target_date
+            )
+            print(f"[INFO] Historical Korean politics news: {len(korean_politics)} articles")
+        except Exception as e:
+            print(f"[ERROR] Korean politics news fetch failed: {e}")
+    else:
+        print("[WARN] SERPAPI_KEY not set — skipping intl & Korean politics news")
+
     return {
-        "target_date":   target_date,
-        "macro":         macro,
-        "prices":        prices,
-        "charts":        charts,
-        "fundamentals":  fundamentals,
-        "news":          news,
-        "intl_news":     intl_news,
+        "target_date":      target_date,
+        "macro":            macro,
+        "prices":           prices,
+        "charts":           charts,
+        "fundamentals":     fundamentals,
+        "news":             news,
+        "intl_news":        intl_news,
+        "korean_politics":  korean_politics,
     }

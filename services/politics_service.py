@@ -1,7 +1,6 @@
 import os
 import re
 import requests
-import feedparser
 from dotenv import load_dotenv
 from services.news_utils import deduplicate_news, format_news_for_prompt
 
@@ -9,20 +8,9 @@ load_dotenv()
 
 NAVER_CLIENT_ID = os.getenv("NAVER_CLIENT_ID")
 NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET")
+SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
 
 KOREAN_ECONOMY_KEYWORD = "한국 경제 금융 증권"
-
-INTERNATIONAL_RSS_FEEDS = [
-    "https://feeds.bbci.co.uk/news/business/rss.xml",
-    "https://feeds.reuters.com/reuters/businessNews",
-]
-
-ECONOMY_KEYWORDS = [
-    "economy", "economic", "finance", "financial", "stock", "market",
-    "trade", "gdp", "inflation", "fed", "bank", "investment", "currency",
-    "debt", "growth", "recession", "interest rate", "bond", "fund",
-    "fiscal", "monetary", "export", "import", "tariff", "oil", "energy",
-]
 
 
 def get_korean_politics_news(limit: int = 100) -> list[dict]:
@@ -53,27 +41,36 @@ def get_korean_politics_news(limit: int = 100) -> list[dict]:
 
 
 def get_international_news(limit: int = 50) -> list[dict]:
-    results = []
-    for feed_url in INTERNATIONAL_RSS_FEEDS:
-        try:
-            feed = feedparser.parse(feed_url)
-            for entry in feed.entries:
-                title = entry.get("title", "")
-                summary = _strip_html(entry.get("summary", ""))
-                combined = (title + " " + summary).lower()
-                if not any(kw in combined for kw in ECONOMY_KEYWORDS):
-                    continue
-                results.append({
-                    "title": title,
-                    "summary": summary,
-                    "url": entry.get("link", ""),
-                    "source": feed.feed.get("title", ""),
-                    "published_at": entry.get("published", ""),
-                })
-        except Exception:
-            continue
-    deduped = deduplicate_news(results)
-    return format_news_for_prompt(deduped[:limit])
+    """SerpAPI Google News로 국제 경제/금융 뉴스 수집"""
+    if not SERPAPI_KEY:
+        print("[WARN] SERPAPI_KEY not set — skipping international news")
+        return []
+    try:
+        params = {
+            "engine": "google_news",
+            "q": "global economy finance stock market",
+            "gl": "us",
+            "hl": "en",
+            "api_key": SERPAPI_KEY,
+        }
+        resp = requests.get("https://serpapi.com/search", params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        articles = data.get("news_results", [])
+        raw = []
+        for a in articles:
+            raw.append({
+                "title": a.get("title", ""),
+                "summary": a.get("snippet", ""),
+                "url": a.get("link", ""),
+                "source": a.get("source", {}).get("name", "") if isinstance(a.get("source"), dict) else str(a.get("source", "")),
+                "published_at": a.get("date", ""),
+            })
+        deduped = deduplicate_news(raw)
+        return format_news_for_prompt(deduped[:limit])
+    except Exception as e:
+        print(f"[ERROR] SerpAPI international news failed: {e}")
+        return []
 
 
 def _strip_html(text: str) -> str:

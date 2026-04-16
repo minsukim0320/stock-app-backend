@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from typing import Optional
 from services.historical_data_service import (
     get_full_historical_context, get_historical_chart,
-    get_historical_news, get_historical_international_news,
+    get_historical_news,
     _yf_download, _safe_float,
 )
 

@@ -4,3 +4,4 @@ yfinance>=0.2.40
 requests
 python-dotenv
 feedparser
+google-search-results
