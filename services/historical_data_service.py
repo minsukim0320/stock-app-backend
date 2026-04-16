@@ -10,6 +10,7 @@ import requests
 from datetime import datetime, timedelta
 from typing import Optional
 from services.news_utils import deduplicate_news, format_news_for_prompt
+from services.sec_edgar_service import get_filing_map, match_column_to_report_date
 
 # 매크로 지표 티커
 MACRO_TICKERS = {
@@ -295,19 +296,40 @@ def get_historical_fundamentals(ticker: str, target_date: str) -> dict:
 
         dt = datetime.strptime(target_date, "%Y-%m-%d")
 
-        # 과거 분기 컬럼만 필터 (target_date 이전)
+        # SEC EDGAR에서 target_date 이전에 실제 공시된 10-Q/10-K만 조회
+        # → 미국 외 종목이면 빈 dict → 빈 펀더멘털로 조기 반환
+        filing_map = get_filing_map(ticker, target_date)
+        if not filing_map:
+            print(f"[INFO] No SEC filings before {target_date} for {ticker} — fundamentals skipped (non-US or no prior filing)")
+            return {
+                "ticker": ticker.upper(),
+                "_note": f"no_sec_filings_before_{target_date}",
+            }
+
+        # yfinance의 분기 컬럼(period-end Timestamp) → SEC reportDate 매칭
+        # 매칭 실패 시 "공시된 적 없는 분기"로 간주하고 제외
+        # filingDate 최신순으로 정렬해 latest_f/latest_b 결정
         def past_cols(df):
             if df is None or df.empty:
                 return []
-            return sorted(
-                [c for c in df.columns if c.to_pydatetime().replace(tzinfo=None) <= dt],
-                reverse=True,
-            )
+            matched = []
+            for c in df.columns:
+                rd = match_column_to_report_date(c, filing_map)
+                if rd:
+                    matched.append((c, filing_map[rd]))  # (column, filingDate)
+            matched.sort(key=lambda x: x[1], reverse=True)
+            return [c for (c, _) in matched]
 
         f_cols = past_cols(qf)
         b_cols = past_cols(qb)
         latest_f = f_cols[0] if f_cols else None
         latest_b = b_cols[0] if b_cols else None
+
+        # 참고용: 사용한 최신 분기의 실제 공시일
+        latest_filing_date = None
+        if latest_b is not None:
+            rd = match_column_to_report_date(latest_b, filing_map)
+            latest_filing_date = filing_map.get(rd) if rd else None
 
         # ── 손익계산서 항목 ──
         net_income   = _get_row(qf, ["Net Income", "Net Income Common Stockholders"])
@@ -444,8 +466,9 @@ def get_historical_fundamentals(ticker: str, target_date: str) -> dict:
             "return_on_assets":  r(roa),
             "short_percent":     None,  # 과거 short interest는 yfinance에서 제공 안 됨
             "market_cap":        r(market_cap, 0),
-            "_note":             f"computed_from_quarterly_reports_before_{target_date}",
+            "_note":             f"computed_from_sec_filings_before_{target_date}",
             "_report_date":      latest_b.strftime("%Y-%m-%d") if latest_b else None,
+            "_filed_date":       latest_filing_date,
         }
     except Exception as e:
         print(f"[WARN] Fundamentals failed for {ticker}: {e}")
