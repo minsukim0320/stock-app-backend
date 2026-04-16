@@ -11,38 +11,49 @@ ECONOMY_KEYWORDS = [
 
 
 def get_stock_price(ticker: str) -> dict:
-    from datetime import datetime, timezone
+    """
+    단일 종목 현재가 + 전일 대비. Yahoo가 /quoteSummary(stock.info/fast_info)를
+    rate-limit하는 경우가 잦으므로 yf.download(period=5d)를 우선 사용.
+    fast_info는 통화 정보 보강용으로만 best-effort 사용.
+    """
     stock = yf.Ticker(ticker)
-    info = stock.fast_info
 
-    last_price = getattr(info, "last_price", None)
-    prev_close = getattr(info, "previous_close", None)
-    currency = getattr(info, "currency", None)
-
-    # fast_info 실패 시 history fallback
-    if last_price is None or prev_close is None:
-        hist = stock.history(period="5d")
-        if hist.empty:
-            raise Exception(f"{ticker}: 주가 데이터를 가져올 수 없습니다 (fast_info 및 history 모두 실패)")
-        last_price = float(hist["Close"].iloc[-1])
-        prev_close = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else last_price
-        if currency is None:
-            try:
-                currency = stock.info.get("currency", "USD")
-            except Exception:
-                currency = "USD"
-
-    # yfinance free tier는 15분 지연 가능 → 마지막 1분봉의 timestamp와
-    # 현재 UTC 시각 차이로 대략적인 delay를 계산해 반환 (클라이언트 stale 표시용)
-    delay_minutes = None
+    # 1) yf.download는 chart API를 써서 rate-limit에 더 강함
+    last_price = None
+    prev_close = None
     try:
-        hist_1m = stock.history(period="1d", interval="1m")
-        if not hist_1m.empty:
-            last_ts = hist_1m.index[-1].to_pydatetime()
-            if last_ts.tzinfo is None:
-                last_ts = last_ts.replace(tzinfo=timezone.utc)
-            delta = datetime.now(timezone.utc) - last_ts
-            delay_minutes = max(0, int(delta.total_seconds() // 60))
+        df = yf.download([ticker], period="5d", progress=False,
+                         auto_adjust=True, timeout=20)
+        if not df.empty:
+            if isinstance(df.columns, pd.MultiIndex):
+                close = df["Close"][ticker].dropna()
+            else:
+                close = df["Close"].dropna()
+            if not close.empty:
+                last_price = float(close.iloc[-1])
+                prev_close = float(close.iloc[-2]) if len(close) >= 2 else last_price
+    except Exception as e:
+        # 아래 fallback에서 재시도
+        pass
+
+    # 2) yf.download 실패 시 Ticker.history fallback
+    if last_price is None:
+        try:
+            hist = stock.history(period="5d")
+            if not hist.empty:
+                last_price = float(hist["Close"].iloc[-1])
+                prev_close = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else last_price
+        except Exception:
+            pass
+
+    if last_price is None:
+        raise Exception(f"{ticker}: 주가 데이터를 가져올 수 없습니다")
+
+    # 3) 통화 — fast_info best-effort (실패해도 USD 가정)
+    currency = "USD"
+    try:
+        info = stock.fast_info
+        currency = getattr(info, "currency", None) or "USD"
     except Exception:
         pass
 
@@ -54,8 +65,8 @@ def get_stock_price(ticker: str) -> dict:
         "price": round(last_price, 2),
         "change": round(change, 2),
         "change_percent": round(change_pct, 2),
-        "currency": currency or "USD",
-        "delay_minutes": delay_minutes,
+        "currency": currency,
+        "delay_minutes": None,  # 정확한 지연 측정은 별도 1m history 호출이 필요해 제거
     }
 
 
