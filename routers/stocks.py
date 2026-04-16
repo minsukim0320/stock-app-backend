@@ -39,9 +39,9 @@ def korean_politics_news(limit: int = 40):
 
 
 @router.get("/news/international")
-def international_news(limit: int = 40):
+def international_news(limit: int = 40, serpapi_key: str = ""):
     try:
-        return get_international_news(limit)
+        return get_international_news(limit, serpapi_key=serpapi_key)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

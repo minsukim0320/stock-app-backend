@@ -8,7 +8,6 @@ load_dotenv()
 
 NAVER_CLIENT_ID = os.getenv("NAVER_CLIENT_ID")
 NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET")
-SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
 
 KOREAN_ECONOMY_KEYWORD = "한국 경제 금융 증권"
 
@@ -40,18 +39,20 @@ def get_korean_politics_news(limit: int = 100) -> list[dict]:
     return format_news_for_prompt(deduplicate_news(raw))
 
 
-def get_international_news(limit: int = 50) -> list[dict]:
-    """SerpAPI Google News로 국제 경제/금융 뉴스 수집"""
-    if not SERPAPI_KEY:
-        print("[WARN] SERPAPI_KEY not set — skipping international news")
+def get_international_news(limit: int = 50, serpapi_key: str = "") -> list[dict]:
+    """SerpAPI Google News로 국제 경제/금융 뉴스 수집 (클라이언트 제공 키 사용)"""
+    if not serpapi_key:
+        print("[WARN] SerpAPI key not provided — skipping international news")
         return []
     try:
         params = {
-            "engine": "google_news",
+            "engine": "google",
+            "tbm": "nws",
             "q": "global economy finance stock market",
             "gl": "us",
             "hl": "en",
-            "api_key": SERPAPI_KEY,
+            "num": limit,
+            "api_key": serpapi_key,
         }
         resp = requests.get("https://serpapi.com/search", params=params, timeout=15)
         resp.raise_for_status()
@@ -63,7 +64,7 @@ def get_international_news(limit: int = 50) -> list[dict]:
                 "title": a.get("title", ""),
                 "summary": a.get("snippet", ""),
                 "url": a.get("link", ""),
-                "source": a.get("source", {}).get("name", "") if isinstance(a.get("source"), dict) else str(a.get("source", "")),
+                "source": a.get("source", "") if isinstance(a.get("source"), str) else a.get("source", {}).get("name", ""),
                 "published_at": a.get("date", ""),
             })
         deduped = deduplicate_news(raw)

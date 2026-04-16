@@ -15,6 +15,7 @@ class HistoricalContextRequest(BaseModel):
     tickers: list[str]
     target_date: str          # yyyy-MM-dd
     finnhub_api_key: str = ""
+    serpapi_key: str = ""
 
 
 @router.post("/historical-context")
@@ -26,6 +27,7 @@ async def historical_context(req: HistoricalContextRequest):
         tickers=req.tickers,
         target_date=req.target_date,
         finnhub_api_key=req.finnhub_api_key,
+        serpapi_key=req.serpapi_key,
     )
 
 
