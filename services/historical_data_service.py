@@ -249,57 +249,203 @@ def get_historical_chart(ticker: str, target_date: str, months: int = 3) -> list
         return []
 
 
+def _get_row(df, keys):
+    """재무제표에서 여러 후보 키 중 존재하는 첫 번째 row 반환"""
+    if df is None or df.empty:
+        return None
+    for k in keys:
+        if k in df.index:
+            return df.loc[k]
+    return None
+
+
+def _val_at(row, col):
+    """row에서 col(분기) 값을 float로 — 실패 시 None"""
+    if row is None or col is None:
+        return None
+    try:
+        v = row[col]
+        if v is None or pd.isna(v):
+            return None
+        return float(v)
+    except Exception:
+        return None
+
+
 def get_historical_fundamentals(ticker: str, target_date: str) -> dict:
-    """target_date 이전 가장 최근 분기 재무제표 기반 펀더멘털"""
+    """
+    target_date 이전 가장 최근 분기 재무제표 기반 펀더멘털 (실제 과거값 계산).
+    PE/PB는 target_date 직전 종가 + 분기 재무제표로 재계산 — look-ahead bias 방지.
+    """
     try:
         with _yf_lock:
             stock = yf.Ticker(ticker)
-            info  = stock.info
             try:
-                qf = stock.quarterly_financials
+                qf = stock.quarterly_financials  # income statement
             except Exception:
                 qf = None
+            try:
+                qb = stock.quarterly_balance_sheet
+            except Exception:
+                qb = None
+            try:
+                af = stock.financials  # annual income statement (YoY fallback용)
+            except Exception:
+                af = None
+
         dt = datetime.strptime(target_date, "%Y-%m-%d")
 
-        trailing_eps = None
-        try:
-            if qf is not None and not qf.empty:
-                past_cols = [c for c in qf.columns if c.to_pydatetime().replace(tzinfo=None) <= dt]
-                if past_cols:
-                    latest = max(past_cols)
-                    net_income = qf.loc["Net Income", latest] if "Net Income" in qf.index else None
-                    shares = info.get("sharesOutstanding")
-                    if net_income and shares and shares > 0:
-                        trailing_eps = round(float(net_income) / float(shares), 2)
-        except Exception:
-            pass
+        # 과거 분기 컬럼만 필터 (target_date 이전)
+        def past_cols(df):
+            if df is None or df.empty:
+                return []
+            return sorted(
+                [c for c in df.columns if c.to_pydatetime().replace(tzinfo=None) <= dt],
+                reverse=True,
+            )
 
-        def safe(key, scale=1, decimals=2):
-            val = info.get(key)
-            if val is None or not isinstance(val, (int, float)):
+        f_cols = past_cols(qf)
+        b_cols = past_cols(qb)
+        latest_f = f_cols[0] if f_cols else None
+        latest_b = b_cols[0] if b_cols else None
+
+        # ── 손익계산서 항목 ──
+        net_income   = _get_row(qf, ["Net Income", "Net Income Common Stockholders"])
+        revenue      = _get_row(qf, ["Total Revenue", "Operating Revenue"])
+        gross_profit = _get_row(qf, ["Gross Profit"])
+        op_income    = _get_row(qf, ["Operating Income", "Total Operating Income As Reported"])
+
+        # ── 재무상태표 항목 ──
+        total_assets      = _get_row(qb, ["Total Assets"])
+        total_liabilities = _get_row(qb, ["Total Liabilities Net Minority Interest"])
+        equity            = _get_row(qb, ["Stockholders Equity", "Common Stock Equity", "Total Equity Gross Minority Interest"])
+        total_debt        = _get_row(qb, ["Total Debt"])
+        current_assets    = _get_row(qb, ["Current Assets"])
+        current_liab      = _get_row(qb, ["Current Liabilities"])
+        shares_out        = _get_row(qb, ["Ordinary Shares Number", "Share Issued"])
+
+        def r(v, dec=2):
+            return round(v, dec) if v is not None else None
+
+        # ── 4분기 합산(TTM) — 4개 분기 Net Income / Revenue ──
+        def ttm(row):
+            if row is None or len(f_cols) < 1:
                 return None
-            return round(val * scale, decimals)
+            cols4 = f_cols[:4]
+            try:
+                vals = [float(row[c]) for c in cols4 if c in row.index and pd.notna(row[c])]
+                return sum(vals) if vals else None
+            except Exception:
+                return None
+
+        ttm_net_income = ttm(net_income)
+        ttm_revenue    = ttm(revenue)
+        ttm_gross      = ttm(gross_profit)
+        ttm_op         = ttm(op_income)
+
+        # 최신 분기 값
+        q_shares = _val_at(shares_out, latest_b)
+        q_equity = _val_at(equity, latest_b)
+        q_assets = _val_at(total_assets, latest_b)
+        q_debt   = _val_at(total_debt, latest_b)
+        q_ca     = _val_at(current_assets, latest_b)
+        q_cl     = _val_at(current_liab, latest_b)
+
+        # ── 주가 기반 지표: target_date 직전 거래일 종가 사용 ──
+        price = _nearest_close(ticker, target_date)
+        market_cap = None
+        if price and q_shares and q_shares > 0:
+            market_cap = price * q_shares
+
+        # EPS (TTM)
+        trailing_eps = None
+        if ttm_net_income is not None and q_shares and q_shares > 0:
+            trailing_eps = ttm_net_income / q_shares
+
+        # PE = price / EPS
+        trailing_pe = None
+        if price and trailing_eps and trailing_eps > 0:
+            trailing_pe = price / trailing_eps
+
+        # PB = price / (equity / shares)
+        price_to_book = None
+        if price and q_equity and q_shares and q_shares > 0:
+            bvps = q_equity / q_shares
+            if bvps > 0:
+                price_to_book = price / bvps
+
+        # ROE = TTM NI / equity
+        roe = None
+        if ttm_net_income is not None and q_equity and q_equity > 0:
+            roe = ttm_net_income / q_equity * 100
+
+        # ROA = TTM NI / total assets
+        roa = None
+        if ttm_net_income is not None and q_assets and q_assets > 0:
+            roa = ttm_net_income / q_assets * 100
+
+        # D/E = total debt / equity
+        debt_to_equity = None
+        if q_debt is not None and q_equity and q_equity > 0:
+            debt_to_equity = q_debt / q_equity * 100  # 백분율
+
+        # Current ratio
+        current_ratio = None
+        if q_ca and q_cl and q_cl > 0:
+            current_ratio = q_ca / q_cl
+
+        # Margins (TTM)
+        gross_margins     = (ttm_gross / ttm_revenue * 100) if (ttm_gross and ttm_revenue) else None
+        operating_margins = (ttm_op / ttm_revenue * 100)    if (ttm_op and ttm_revenue)    else None
+        profit_margins    = (ttm_net_income / ttm_revenue * 100) if (ttm_net_income and ttm_revenue) else None
+
+        # YoY 성장률 (최신분기 vs 4분기 전) — 부족 시 연간 재무제표로 fallback
+        def yoy(row):
+            if row is None or len(f_cols) < 5:
+                return None
+            cur = _val_at(row, f_cols[0])
+            prv = _val_at(row, f_cols[4])
+            if cur is None or prv is None or prv == 0:
+                return None
+            return (cur - prv) / abs(prv) * 100
+
+        def yoy_annual(key_list):
+            a_cols = past_cols(af)
+            if len(a_cols) < 2:
+                return None
+            row = _get_row(af, key_list)
+            if row is None:
+                return None
+            cur = _val_at(row, a_cols[0])
+            prv = _val_at(row, a_cols[1])
+            if cur is None or prv is None or prv == 0:
+                return None
+            return (cur - prv) / abs(prv) * 100
+
+        revenue_growth  = yoy(revenue)  or yoy_annual(["Total Revenue", "Operating Revenue"])
+        earnings_growth = yoy(net_income) or yoy_annual(["Net Income", "Net Income Common Stockholders"])
 
         return {
             "ticker":            ticker.upper(),
-            "trailing_pe":       safe("trailingPE"),
-            "forward_pe":        safe("forwardPE"),
-            "peg_ratio":         safe("pegRatio"),
-            "price_to_book":     safe("priceToBook"),
-            "trailing_eps":      trailing_eps or safe("trailingEps"),
-            "forward_eps":       safe("forwardEps"),
-            "revenue_growth":    safe("revenueGrowth",    scale=100),
-            "earnings_growth":   safe("earningsGrowth",   scale=100),
-            "gross_margins":     safe("grossMargins",     scale=100),
-            "operating_margins": safe("operatingMargins", scale=100),
-            "profit_margins":    safe("profitMargins",    scale=100),
-            "debt_to_equity":    safe("debtToEquity"),
-            "current_ratio":     safe("currentRatio"),
-            "return_on_equity":  safe("returnOnEquity",   scale=100),
-            "return_on_assets":  safe("returnOnAssets",   scale=100),
-            "short_percent":     safe("shortPercentOfFloat", scale=100),
-            "market_cap":        info.get("marketCap"),
-            "_note": "fundamentals_approximate_current_values",
+            "trailing_pe":       r(trailing_pe),
+            "forward_pe":        None,  # 과거 시점의 forward EPS 추정치는 접근 불가
+            "peg_ratio":         None,
+            "price_to_book":     r(price_to_book),
+            "trailing_eps":      r(trailing_eps),
+            "forward_eps":       None,
+            "revenue_growth":    r(revenue_growth),
+            "earnings_growth":   r(earnings_growth),
+            "gross_margins":     r(gross_margins),
+            "operating_margins": r(operating_margins),
+            "profit_margins":    r(profit_margins),
+            "debt_to_equity":    r(debt_to_equity),
+            "current_ratio":     r(current_ratio),
+            "return_on_equity":  r(roe),
+            "return_on_assets":  r(roa),
+            "short_percent":     None,  # 과거 short interest는 yfinance에서 제공 안 됨
+            "market_cap":        r(market_cap, 0),
+            "_note":             f"computed_from_quarterly_reports_before_{target_date}",
+            "_report_date":      latest_b.strftime("%Y-%m-%d") if latest_b else None,
         }
     except Exception as e:
         print(f"[WARN] Fundamentals failed for {ticker}: {e}")
@@ -307,14 +453,14 @@ def get_historical_fundamentals(ticker: str, target_date: str) -> dict:
 
 
 def get_historical_news(ticker: str, target_date: str, finnhub_api_key: str, days_before: int = 14) -> list[dict]:
-    """Finnhub으로 target_date 전후 영어 뉴스 조회"""
+    """Finnhub으로 target_date 이전 영어 뉴스 조회 (D 당일 제외 — look-ahead bias 방지)"""
     if not finnhub_api_key:
         print(f"[WARN] Finnhub API key empty — skipping news for {ticker}")
         return []
     try:
         dt   = datetime.strptime(target_date, "%Y-%m-%d")
         frm  = (dt - timedelta(days=days_before)).strftime("%Y-%m-%d")
-        to   = dt.strftime("%Y-%m-%d")
+        to   = (dt - timedelta(days=1)).strftime("%Y-%m-%d")  # D-1까지만
         clean_ticker = ticker.replace("=", "").replace("^", "")
         url = "https://finnhub.io/api/v1/company-news"
         params = {
@@ -355,14 +501,14 @@ def get_historical_news(ticker: str, target_date: str, finnhub_api_key: str, day
 def _serpapi_news_search(query: str, target_date: str, gl: str, hl: str, serpapi_key: str, days_before: int = 14) -> list[dict]:
     """
     SerpAPI Google News (tbm=nws) — tbs 파라미터로 날짜 범위 필터링.
-    target_date 이전 days_before일 ~ target_date 사이의 뉴스만 반환.
+    target_date 이전 days_before일 ~ D-1일까지 뉴스만 반환 (look-ahead bias 방지).
     """
     if not serpapi_key:
         return []
     try:
         dt = datetime.strptime(target_date, "%Y-%m-%d")
         cd_min = (dt - timedelta(days=days_before)).strftime("%m/%d/%Y")
-        cd_max = dt.strftime("%m/%d/%Y")
+        cd_max = (dt - timedelta(days=1)).strftime("%m/%d/%Y")  # D-1까지만
         params = {
             "engine": "google",
             "tbm": "nws",
