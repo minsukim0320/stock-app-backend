@@ -146,33 +146,163 @@ def get_english_news(ticker: str, limit: int = 40) -> list[dict]:
     return format_news_for_prompt(deduped[:limit])
 
 
-def get_fundamentals(ticker: str) -> dict:
-    stock = yf.Ticker(ticker)
-    info = stock.info
+def _get_row(df, keys):
+    if df is None or df.empty:
+        return None
+    for k in keys:
+        if k in df.index:
+            return df.loc[k]
+    return None
 
-    def safe(key, scale=1, decimals=2):
-        val = info.get(key)
-        if val is None or not isinstance(val, (int, float)):
+
+def _val_at(row, col):
+    if row is None or col is None:
+        return None
+    try:
+        v = row[col]
+        if v is None or pd.isna(v):
             return None
-        return round(val * scale, decimals)
+        return float(v)
+    except Exception:
+        return None
+
+
+def get_fundamentals(ticker: str) -> dict:
+    """
+    현재 시점 펀더멘털 — 분기 재무제표 + 최근 종가 기반으로 직접 계산.
+    stock.info는 Yahoo가 자주 rate-limit(YFRateLimitError)하므로
+    과거 시뮬레이션과 동일한 방식으로 통일해 안정성 확보.
+    """
+    stock = yf.Ticker(ticker)
+    try:
+        qf = stock.quarterly_financials
+    except Exception:
+        qf = None
+    try:
+        qb = stock.quarterly_balance_sheet
+    except Exception:
+        qb = None
+    try:
+        af = stock.financials
+    except Exception:
+        af = None
+
+    # 최신 종가 — 5d history로 안전 조회 (fast_info는 불안정)
+    try:
+        hist = stock.history(period="5d")
+        price = float(hist["Close"].iloc[-1]) if not hist.empty else None
+    except Exception:
+        price = None
+
+    # 분기/연간 컬럼을 최신순으로
+    def cols(df):
+        if df is None or df.empty:
+            return []
+        return sorted(df.columns, reverse=True)
+
+    f_cols = cols(qf)
+    b_cols = cols(qb)
+    a_cols = cols(af)
+    latest_b = b_cols[0] if b_cols else None
+
+    # ── 손익계산서 ──
+    net_income   = _get_row(qf, ["Net Income", "Net Income Common Stockholders"])
+    revenue      = _get_row(qf, ["Total Revenue", "Operating Revenue"])
+    gross_profit = _get_row(qf, ["Gross Profit"])
+    op_income    = _get_row(qf, ["Operating Income", "Total Operating Income As Reported"])
+
+    # ── 재무상태표 ──
+    total_assets   = _get_row(qb, ["Total Assets"])
+    equity         = _get_row(qb, ["Stockholders Equity", "Common Stock Equity", "Total Equity Gross Minority Interest"])
+    total_debt     = _get_row(qb, ["Total Debt"])
+    current_assets = _get_row(qb, ["Current Assets"])
+    current_liab   = _get_row(qb, ["Current Liabilities"])
+    shares_out     = _get_row(qb, ["Ordinary Shares Number", "Share Issued"])
+
+    def r(v, dec=2):
+        return round(v, dec) if v is not None else None
+
+    # TTM (최근 4분기 합산)
+    def ttm(row):
+        if row is None or not f_cols:
+            return None
+        try:
+            vals = [float(row[c]) for c in f_cols[:4]
+                    if c in row.index and pd.notna(row[c])]
+            return sum(vals) if vals else None
+        except Exception:
+            return None
+
+    ttm_ni     = ttm(net_income)
+    ttm_rev    = ttm(revenue)
+    ttm_gross  = ttm(gross_profit)
+    ttm_op     = ttm(op_income)
+
+    q_shares = _val_at(shares_out, latest_b)
+    q_equity = _val_at(equity, latest_b)
+    q_assets = _val_at(total_assets, latest_b)
+    q_debt   = _val_at(total_debt, latest_b)
+    q_ca     = _val_at(current_assets, latest_b)
+    q_cl     = _val_at(current_liab, latest_b)
+
+    market_cap   = price * q_shares if (price and q_shares and q_shares > 0) else None
+    trailing_eps = ttm_ni / q_shares if (ttm_ni is not None and q_shares and q_shares > 0) else None
+    trailing_pe  = price / trailing_eps if (price and trailing_eps and trailing_eps > 0) else None
+    price_to_book = None
+    if price and q_equity and q_shares and q_shares > 0:
+        bvps = q_equity / q_shares
+        if bvps > 0:
+            price_to_book = price / bvps
+    roe = ttm_ni / q_equity * 100 if (ttm_ni is not None and q_equity and q_equity > 0) else None
+    roa = ttm_ni / q_assets * 100 if (ttm_ni is not None and q_assets and q_assets > 0) else None
+    d2e = q_debt / q_equity * 100 if (q_debt is not None and q_equity and q_equity > 0) else None
+    cur_ratio = q_ca / q_cl if (q_ca and q_cl and q_cl > 0) else None
+    gm = (ttm_gross / ttm_rev * 100) if (ttm_gross and ttm_rev) else None
+    om = (ttm_op / ttm_rev * 100)    if (ttm_op and ttm_rev)    else None
+    pm = (ttm_ni / ttm_rev * 100)    if (ttm_ni is not None and ttm_rev) else None
+
+    # YoY — 분기 우선, 부족 시 연간 fallback
+    def yoy_q(row):
+        if row is None or len(f_cols) < 5:
+            return None
+        cur = _val_at(row, f_cols[0])
+        prv = _val_at(row, f_cols[4])
+        if cur is None or prv is None or prv == 0:
+            return None
+        return (cur - prv) / abs(prv) * 100
+
+    def yoy_a(key_list):
+        if len(a_cols) < 2:
+            return None
+        row = _get_row(af, key_list)
+        if row is None:
+            return None
+        cur = _val_at(row, a_cols[0])
+        prv = _val_at(row, a_cols[1])
+        if cur is None or prv is None or prv == 0:
+            return None
+        return (cur - prv) / abs(prv) * 100
+
+    rev_g  = yoy_q(revenue)    or yoy_a(["Total Revenue", "Operating Revenue"])
+    earn_g = yoy_q(net_income) or yoy_a(["Net Income", "Net Income Common Stockholders"])
 
     return {
-        "ticker": ticker.upper(),
-        "trailing_pe":        safe("trailingPE"),
-        "forward_pe":         safe("forwardPE"),
-        "peg_ratio":          safe("pegRatio"),
-        "price_to_book":      safe("priceToBook"),
-        "trailing_eps":       safe("trailingEps"),
-        "forward_eps":        safe("forwardEps"),
-        "revenue_growth":     safe("revenueGrowth",     scale=100),
-        "earnings_growth":    safe("earningsGrowth",    scale=100),
-        "gross_margins":      safe("grossMargins",      scale=100),
-        "operating_margins":  safe("operatingMargins",  scale=100),
-        "profit_margins":     safe("profitMargins",     scale=100),
-        "debt_to_equity":     safe("debtToEquity"),
-        "current_ratio":      safe("currentRatio"),
-        "return_on_equity":   safe("returnOnEquity",    scale=100),
-        "return_on_assets":   safe("returnOnAssets",    scale=100),
-        "short_percent":      safe("shortPercentOfFloat", scale=100),
-        "market_cap":         info.get("marketCap"),
+        "ticker":            ticker.upper(),
+        "trailing_pe":       r(trailing_pe),
+        "forward_pe":        None,   # stock.info 의존 — rate-limit로 제거
+        "peg_ratio":         None,
+        "price_to_book":     r(price_to_book),
+        "trailing_eps":      r(trailing_eps),
+        "forward_eps":       None,
+        "revenue_growth":    r(rev_g),
+        "earnings_growth":   r(earn_g),
+        "gross_margins":     r(gm),
+        "operating_margins": r(om),
+        "profit_margins":    r(pm),
+        "debt_to_equity":    r(d2e),
+        "current_ratio":     r(cur_ratio),
+        "return_on_equity":  r(roe),
+        "return_on_assets":  r(roa),
+        "short_percent":     None,
+        "market_cap":        r(market_cap, 0),
     }
