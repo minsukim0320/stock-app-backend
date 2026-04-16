@@ -27,20 +27,23 @@ MACRO_TICKERS = {
 _yf_lock = threading.Lock()
 
 
-def _yf_download(ticker: str, start: str, end: str, timeout_sec: int = 30) -> pd.DataFrame:
+def _yf_download(ticker, start: str, end: str, timeout_sec: int = 30) -> pd.DataFrame:
     """yfinance download with timeout protection, MultiIndex flattening, and thread-safety lock"""
+    # 단일 문자열 → 리스트 변환 (yfinance 1.2+ 단일 문자열 호출 시 TypeError 방지)
+    tickers_arg = [ticker] if isinstance(ticker, str) else list(ticker)
+    is_single = len(tickers_arg) == 1
     try:
         with _yf_lock:
-            df = yf.download(ticker, start=start, end=end,
+            df = yf.download(tickers_arg, start=start, end=end,
                              progress=False, auto_adjust=True, timeout=timeout_sec)
         if df.empty:
             return df
-        # MultiIndex 평탄화 (단일 티커인데 MultiIndex 반환되는 경우)
-        if isinstance(df.columns, pd.MultiIndex):
+        # MultiIndex 평탄화 (단일 티커 리스트일 때)
+        if isinstance(df.columns, pd.MultiIndex) and is_single:
             df.columns = df.columns.droplevel(1)
         return df
     except Exception as e:
-        print(f"[ERROR] yf.download({ticker}, {start}~{end}) failed: {e}")
+        print(f"[ERROR] yf.download({tickers_arg}, {start}~{end}) failed: {e}")
         return pd.DataFrame()
 
 
@@ -96,10 +99,15 @@ def _batch_nearest_closes(tickers, target_date: str) -> dict:
                              progress=False, auto_adjust=True, timeout=30)
     except Exception as e:
         print(f"[ERROR] batch yf.download({yf_tickers}) failed: {e}")
-        return {label: None for label in labels}
+        df = pd.DataFrame()
 
     if df.empty:
-        return {label: None for label in labels}
+        # 배치 실패 → 개별 fallback
+        print(f"[WARN] Batch close download empty — falling back to individual downloads")
+        result = {}
+        for label, yf_ticker in zip(labels, yf_tickers):
+            result[label] = _nearest_close(yf_ticker, target_date)
+        return result
 
     is_multi = isinstance(df.columns, pd.MultiIndex)
     result = {}
@@ -118,6 +126,12 @@ def _batch_nearest_closes(tickers, target_date: str) -> dict:
         except Exception as e:
             print(f"[WARN] batch close extraction failed for {label}/{yf_ticker}: {e}")
             result[label] = None
+
+    # 배치 결과가 모두 None이면 → 개별 다운로드 fallback (Render 등 배치 차단 대응)
+    if result and all(v is None for v in result.values()):
+        print(f"[WARN] Batch download returned all None — falling back to individual downloads")
+        for label, yf_ticker in zip(labels, yf_tickers):
+            result[label] = _nearest_close(yf_ticker, target_date)
 
     return result
 
@@ -139,10 +153,15 @@ def _batch_historical_charts(tickers: list, target_date: str, months: int = 3) -
                              progress=False, auto_adjust=True, timeout=60)
     except Exception as e:
         print(f"[ERROR] batch chart yf.download({tickers}) failed: {e}")
-        return {t: [] for t in tickers}
+        df = pd.DataFrame()
 
     if df.empty:
-        return {t: [] for t in tickers}
+        # 배치 실패 → 개별 fallback
+        print(f"[WARN] Batch chart download empty — falling back to individual downloads")
+        result = {}
+        for ticker in tickers:
+            result[ticker] = get_historical_chart(ticker, target_date, months)
+        return result
 
     is_multi = isinstance(df.columns, pd.MultiIndex)
     result = {}
@@ -170,6 +189,12 @@ def _batch_historical_charts(tickers: list, target_date: str, months: int = 3) -
         except Exception as e:
             print(f"[WARN] batch chart extraction failed for {ticker}: {e}")
             result[ticker] = []
+
+    # 모든 차트가 비어있으면 → 개별 다운로드 fallback (Render 등 배치 차단 대응)
+    if result and all(not v for v in result.values()):
+        print(f"[WARN] Batch chart download empty — falling back to individual downloads")
+        for ticker in tickers:
+            result[ticker] = get_historical_chart(ticker, target_date, months)
 
     return result
 
