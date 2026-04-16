@@ -1,3 +1,5 @@
+import traceback
+import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from services.yfinance_service import (
@@ -9,6 +11,12 @@ from services.politics_service import get_korean_politics_news, get_internationa
 
 router = APIRouter(prefix="/stocks", tags=["stocks"])
 
+_log = logging.getLogger("stockapp.server")
+
+
+def _log_err(where: str, e: Exception):
+    _log.error(f"{where}: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+
 
 class PricesBatchRequest(BaseModel):
     tickers: list[str]
@@ -19,6 +27,7 @@ def stock_price(ticker: str):
     try:
         return get_stock_price(ticker)
     except Exception as e:
+        _log_err(f"stock_price({ticker})", e)
         raise HTTPException(status_code=404, detail=str(e))
 
 
@@ -28,6 +37,7 @@ def stock_prices_batch(req: PricesBatchRequest):
     try:
         return get_stock_prices_batch(req.tickers)
     except Exception as e:
+        _log_err(f"stock_prices_batch({len(req.tickers)} tickers)", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -36,6 +46,7 @@ def stock_chart(ticker: str, period: str = "1mo"):
     try:
         return get_chart_data(ticker, period)
     except Exception as e:
+        _log_err(f"stock_chart({ticker}, {period})", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -44,6 +55,7 @@ def stock_fundamentals(ticker: str):
     try:
         return get_fundamentals(ticker)
     except Exception as e:
+        _log_err(f"stock_fundamentals({ticker})", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -52,6 +64,7 @@ def korean_politics_news(limit: int = 40):
     try:
         return get_korean_politics_news(limit)
     except Exception as e:
+        _log_err(f"korean_politics_news(limit={limit})", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -60,6 +73,7 @@ def international_news(limit: int = 40, serpapi_key: str = ""):
     try:
         return get_international_news(limit, serpapi_key=serpapi_key)
     except Exception as e:
+        _log_err(f"international_news(limit={limit})", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -68,6 +82,7 @@ def english_news(ticker: str, limit: int = 40):
     try:
         return get_english_news(ticker, limit)
     except Exception as e:
+        _log_err(f"english_news({ticker})", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -76,4 +91,5 @@ def korean_news(ticker: str, limit: int = 40):
     try:
         return get_korean_news(ticker, limit)
     except Exception as e:
+        _log_err(f"korean_news({ticker})", e)
         raise HTTPException(status_code=500, detail=str(e))

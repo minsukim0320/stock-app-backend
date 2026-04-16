@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import traceback
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 from typing import Optional
@@ -9,6 +11,7 @@ from services.historical_data_service import (
 )
 
 router = APIRouter(prefix="/backtest", tags=["backtest"])
+_log = logging.getLogger("stockapp.server")
 
 
 class HistoricalContextRequest(BaseModel):
@@ -23,12 +26,29 @@ async def historical_context(req: HistoricalContextRequest):
     """
     target_date 기준 백테스팅용 컨텍스트 수집 — asyncio.gather 병렬화
     """
-    return await get_full_historical_context(
-        tickers=req.tickers,
-        target_date=req.target_date,
-        finnhub_api_key=req.finnhub_api_key,
-        serpapi_key=req.serpapi_key,
-    )
+    try:
+        result = await get_full_historical_context(
+            tickers=req.tickers,
+            target_date=req.target_date,
+            finnhub_api_key=req.finnhub_api_key,
+            serpapi_key=req.serpapi_key,
+        )
+        # 수집 통계 자동 로깅 (이후 디버깅용)
+        prices_ok = sum(1 for v in (result.get("prices") or {}).values() if v)
+        charts_ok = sum(1 for v in (result.get("charts") or {}).values() if v)
+        _log.info(
+            f"historical-context {req.target_date}: tickers={len(req.tickers)}, "
+            f"macro={len(result.get('macro') or {})}, prices={prices_ok}, "
+            f"charts={charts_ok}, intl_news={len(result.get('intl_news') or [])}, "
+            f"ko_politics={len(result.get('korean_politics') or [])}"
+        )
+        return result
+    except Exception as e:
+        _log.error(
+            f"historical-context({req.target_date}, {len(req.tickers)} tickers): "
+            f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+        )
+        raise
 
 
 class HistoricalNewsRequest(BaseModel):

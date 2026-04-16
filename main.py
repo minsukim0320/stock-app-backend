@@ -1,7 +1,8 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
 from routers.stocks import router as stocks_router
 from routers.tracking import router as tracking_router
 from routers.backtest import router as backtest_router
@@ -9,56 +10,32 @@ import os
 import sys
 import logging
 import traceback
+import time
 from logging.handlers import RotatingFileHandler
-from datetime import datetime
 
 # ── 서버 측 로그 설정 ────────────────────────────────────────────────
 SERVER_LOG_FILE = os.path.join(os.path.dirname(__file__), "server.log")
 SERVER_LOG_MAX_BYTES = 2 * 1024 * 1024  # 2MB
 
-_server_logger = logging.getLogger("server")
+_server_logger = logging.getLogger("stockapp.server")
 _server_logger.setLevel(logging.INFO)
-_server_handler = RotatingFileHandler(
+_server_logger.propagate = False
+
+_file_handler = RotatingFileHandler(
     SERVER_LOG_FILE, maxBytes=SERVER_LOG_MAX_BYTES, backupCount=1, encoding="utf-8"
 )
-_server_handler.setFormatter(
-    logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
-)
-_server_logger.addHandler(_server_handler)
-# 콘솔에도 출력 (Render stdout에서 계속 보이도록)
+_fmt = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
+_file_handler.setFormatter(_fmt)
+_server_logger.addHandler(_file_handler)
+
 _console_handler = logging.StreamHandler(sys.stdout)
-_console_handler.setFormatter(
-    logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
-)
+_console_handler.setFormatter(_fmt)
 _server_logger.addHandler(_console_handler)
 
 
-class _StdoutTee:
-    """print() 출력을 원래 stdout + server.log 양쪽에 기록"""
-    def __init__(self, original, level=logging.INFO):
-        self.original = original
-        self.level = level
-        self._buffer = ""
-
-    def write(self, msg):
-        self.original.write(msg)
-        self._buffer += msg
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
-            if line.strip():
-                # 콘솔 핸들러가 중복 출력하지 않도록 파일만 기록
-                _server_handler.emit(
-                    logging.LogRecord(
-                        "server", self.level, "", 0, line, None, None
-                    )
-                )
-
-    def flush(self):
-        self.original.flush()
-
-
-sys.stdout = _StdoutTee(sys.__stdout__)
-sys.stderr = _StdoutTee(sys.__stderr__, level=logging.ERROR)
+def server_log(msg: str, level: str = "INFO"):
+    """다른 모듈에서 import해서 사용하는 서버 로거 헬퍼"""
+    getattr(_server_logger, level.lower())(msg)
 
 
 app = FastAPI(title="US Stock News API")
@@ -71,14 +48,40 @@ app.add_middleware(
 )
 
 
-# ── 모든 핸들되지 않은 예외를 server.log에 기록 ─────────────────────
-@app.exception_handler(Exception)
-async def _log_unhandled(request: Request, exc: Exception):
-    tb = traceback.format_exc()
-    _server_logger.error(
-        f"Unhandled {type(exc).__name__} at {request.method} {request.url.path}: {exc}\n{tb}"
-    )
-    return JSONResponse(status_code=500, content={"detail": str(exc)})
+# ── 모든 요청과 에러를 로깅하는 미들웨어 ──────────────────────────────
+class LoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # 로그 조회 엔드포인트는 스킵 (무한 루프 방지)
+        if request.url.path in ("/server-logs", "/logs"):
+            return await call_next(request)
+
+        start = time.monotonic()
+        try:
+            response = await call_next(request)
+            elapsed = time.monotonic() - start
+            # 4xx/5xx는 WARN, 그 외는 조용히 INFO (30초 이상만)
+            if response.status_code >= 400:
+                _server_logger.warning(
+                    f"{request.method} {request.url.path} → HTTP {response.status_code} ({elapsed:.2f}s)"
+                )
+            elif elapsed > 30:
+                _server_logger.info(
+                    f"SLOW {request.method} {request.url.path} ({elapsed:.2f}s)"
+                )
+            return response
+        except Exception as exc:
+            elapsed = time.monotonic() - start
+            tb = traceback.format_exc()
+            _server_logger.error(
+                f"UNHANDLED {type(exc).__name__} at {request.method} {request.url.path} "
+                f"({elapsed:.2f}s): {exc}\n{tb}"
+            )
+            return JSONResponse(status_code=500, content={"detail": str(exc)})
+
+
+app.add_middleware(LoggingMiddleware)
+
+_server_logger.info("Server starting up — logging initialized")
 
 
 app.include_router(stocks_router)
