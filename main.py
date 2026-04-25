@@ -6,6 +6,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from routers.stocks import router as stocks_router
 from routers.tracking import router as tracking_router
 from routers.backtest import router as backtest_router
+from routers.sync import router as sync_router
 import os
 import sys
 import logging
@@ -87,6 +88,7 @@ _server_logger.info("Server starting up — logging initialized")
 app.include_router(stocks_router)
 app.include_router(tracking_router)
 app.include_router(backtest_router)
+app.include_router(sync_router)
 
 LOG_FILE = os.path.join(os.path.dirname(__file__), "client_errors.log")
 MAX_BYTES = 1 * 1024 * 1024  # 1MB
