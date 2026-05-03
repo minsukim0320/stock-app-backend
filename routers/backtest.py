@@ -81,6 +81,23 @@ async def historical_news(req: HistoricalNewsRequest):
     return {"news": news}
 
 
+@router.get("/historical-chart/{ticker}")
+def historical_chart(
+    ticker: str,
+    target_date: str = Query(..., description="기준 날짜 (yyyy-MM-dd) — 이 날짜 미포함 이전 데이터만"),
+    months: int = Query(12, description="기준 날짜 이전 몇 개월치 차트 (기본 12)"),
+):
+    """
+    target_date 이전 N개월 OHLCV 차트 반환 — 옛 hist sim의 지수 분석 lazy load용.
+    look-ahead bias 방지: target_date 미포함.
+    """
+    try:
+        return get_historical_chart(ticker, target_date, months)
+    except Exception as e:
+        _log.error(f"historical_chart({ticker}, {target_date}): {e}")
+        return []
+
+
 @router.get("/forward-chart/{ticker}")
 def forward_chart(
     ticker: str,

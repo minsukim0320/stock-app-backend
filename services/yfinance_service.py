@@ -117,6 +117,51 @@ def get_stock_prices_batch(tickers: list[str]) -> dict:
     return result
 
 
+def get_charts_batch(tickers: list[str], period: str = "1y") -> dict:
+    """
+    여러 종목 OHLCV 차트를 단일 yf.download 배치로 수집.
+    반환: {ticker: [{date, open, high, low, close, volume}, ...]}
+    실패 종목은 빈 리스트 반환.
+    """
+    if not tickers:
+        return {}
+    clean = [t for t in tickers if t]
+    try:
+        df = yf.download(clean, period=period, progress=False,
+                         auto_adjust=True, timeout=60)
+    except Exception as e:
+        raise Exception(f"배치 차트 조회 실패: {e}")
+
+    if df.empty:
+        return {t.upper(): [] for t in clean}
+
+    is_multi = isinstance(df.columns, pd.MultiIndex)
+    result = {}
+    for t in clean:
+        chart = []
+        try:
+            if is_multi:
+                ticker_df = df.xs(t, level=1, axis=1)
+            else:
+                ticker_df = df
+            for date, row in ticker_df.iterrows():
+                try:
+                    chart.append({
+                        "date":   date.strftime("%Y-%m-%d"),
+                        "open":   round(float(row["Open"]), 2),
+                        "high":   round(float(row["High"]), 2),
+                        "low":    round(float(row["Low"]), 2),
+                        "close":  round(float(row["Close"]), 2),
+                        "volume": int(float(row["Volume"])) if not pd.isna(row["Volume"]) else 0,
+                    })
+                except Exception:
+                    continue
+        except Exception:
+            chart = []
+        result[t.upper()] = chart
+    return result
+
+
 def get_chart_data(ticker: str, period: str = "1mo") -> list[dict]:
     stock = yf.Ticker(ticker)
     hist = stock.history(period=period)

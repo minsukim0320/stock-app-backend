@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from services.yfinance_service import (
     get_stock_price, get_stock_prices_batch, get_english_news,
-    get_chart_data, get_fundamentals,
+    get_chart_data, get_charts_batch, get_fundamentals,
 )
 from services.naver_service import get_korean_news
 from services.politics_service import get_korean_politics_news, get_international_news
@@ -20,6 +20,11 @@ def _log_err(where: str, e: Exception):
 
 class PricesBatchRequest(BaseModel):
     tickers: list[str]
+
+
+class ChartsBatchRequest(BaseModel):
+    tickers: list[str]
+    period: str = "1y"
 
 
 @router.get("/{ticker}/price")
@@ -47,6 +52,16 @@ def stock_chart(ticker: str, period: str = "1mo"):
         return get_chart_data(ticker, period)
     except Exception as e:
         _log_err(f"stock_chart({ticker}, {period})", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/charts-batch")
+def stock_charts_batch(req: ChartsBatchRequest):
+    """여러 종목 차트 배치 조회 — 개별 호출 대비 10배+ 빠름. 지수 스캔용."""
+    try:
+        return get_charts_batch(req.tickers, req.period)
+    except Exception as e:
+        _log_err(f"stock_charts_batch({len(req.tickers)} tickers)", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
