@@ -603,7 +603,7 @@ async def get_full_historical_context(
     # asyncio.to_thread로 감싸서 이벤트 루프를 블로킹하지 않음
     macro_future = asyncio.to_thread(_batch_nearest_closes, MACRO_TICKERS, target_date)
     prices_future = asyncio.to_thread(_batch_nearest_closes, tickers, target_date)
-    charts_future = asyncio.to_thread(_batch_historical_charts, tickers, target_date, 3)
+    charts_future = asyncio.to_thread(_batch_historical_charts, tickers, target_date, 12)
 
     batch_results = await asyncio.gather(
         macro_future, prices_future, charts_future,
