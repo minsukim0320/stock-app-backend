@@ -173,6 +173,8 @@ def _batch_historical_charts(tickers: list, target_date: str, months: int = 3) -
             else:
                 ticker_df = df.xs(ticker, level=1, axis=1) if is_multi else df
 
+            # NaN OHLC 행 제거 — JSON 직렬화 ValueError 방지
+            ticker_df = ticker_df.dropna(subset=["Open", "High", "Low", "Close"])
             chart = []
             for date, row in ticker_df.iterrows():
                 try:
@@ -182,7 +184,7 @@ def _batch_historical_charts(tickers: list, target_date: str, months: int = 3) -
                         "high":   round(_safe_float(row["High"]), 2),
                         "low":    round(_safe_float(row["Low"]), 2),
                         "close":  round(_safe_float(row["Close"]), 2),
-                        "volume": int(_safe_float(row["Volume"])),
+                        "volume": int(_safe_float(row["Volume"])) if not pd.isna(row["Volume"]) else 0,
                     })
                 except Exception:
                     continue
@@ -230,6 +232,8 @@ def get_historical_chart(ticker: str, target_date: str, months: int = 3) -> list
         if df.empty:
             print(f"[WARN] No chart data for {ticker} ({start}~{end})")
             return []
+        # NaN OHLC 행 제거 — JSON 직렬화 ValueError 방지
+        df = df.dropna(subset=["Open", "High", "Low", "Close"])
         result = []
         for date, row in df.iterrows():
             try:
@@ -239,7 +243,7 @@ def get_historical_chart(ticker: str, target_date: str, months: int = 3) -> list
                     "high":   round(_safe_float(row["High"]), 2),
                     "low":    round(_safe_float(row["Low"]), 2),
                     "close":  round(_safe_float(row["Close"]), 2),
-                    "volume": int(_safe_float(row["Volume"])),
+                    "volume": int(_safe_float(row["Volume"])) if not pd.isna(row["Volume"]) else 0,
                 })
             except Exception as e:
                 print(f"[WARN] Chart row parse error for {ticker} on {date}: {e}")

@@ -117,6 +117,9 @@ def forward_chart(
         if df.empty:
             print(f"[WARN] forward_chart: no data for {ticker} from {from_date}")
             return []
+        import pandas as pd
+        # NaN OHLC 행 제거 — JSON 직렬화 ValueError 방지
+        df = df.dropna(subset=["Open", "High", "Low", "Close"])
         result = []
         for date, row in df.iterrows():
             try:
@@ -126,7 +129,7 @@ def forward_chart(
                     "high":   round(_safe_float(row["High"]), 2),
                     "low":    round(_safe_float(row["Low"]), 2),
                     "close":  round(_safe_float(row["Close"]), 2),
-                    "volume": int(_safe_float(row["Volume"])),
+                    "volume": int(_safe_float(row["Volume"])) if not pd.isna(row["Volume"]) else 0,
                 })
             except Exception as e:
                 print(f"[WARN] forward_chart row parse error for {ticker}: {e}")

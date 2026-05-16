@@ -146,12 +146,16 @@ def get_charts_batch(tickers: list[str], period: str = "1y") -> dict:
                 ticker_df = df
             for date, row in ticker_df.iterrows():
                 try:
+                    # OHLC 중 하나라도 NaN이면 행 스킵 (JSON 직렬화 ValueError 방지)
+                    o, h, l, c = row["Open"], row["High"], row["Low"], row["Close"]
+                    if pd.isna(o) or pd.isna(h) or pd.isna(l) or pd.isna(c):
+                        continue
                     chart.append({
                         "date":   date.strftime("%Y-%m-%d"),
-                        "open":   round(float(row["Open"]), 2),
-                        "high":   round(float(row["High"]), 2),
-                        "low":    round(float(row["Low"]), 2),
-                        "close":  round(float(row["Close"]), 2),
+                        "open":   round(float(o), 2),
+                        "high":   round(float(h), 2),
+                        "low":    round(float(l), 2),
+                        "close":  round(float(c), 2),
                         "volume": int(float(row["Volume"])) if not pd.isna(row["Volume"]) else 0,
                     })
                 except Exception:
@@ -167,16 +171,21 @@ def get_chart_data(ticker: str, period: str = "1mo") -> list[dict]:
     hist = stock.history(period=period)
     if hist.empty:
         raise Exception(f"{ticker}: 차트 데이터가 비어있습니다 (period={period})")
+    # NaN 행 제거 (yfinance가 거래 정지일 등에 NaN 반환 → JSON 직렬화 ValueError 방지)
+    hist = hist.dropna(subset=["Open", "High", "Low", "Close"])
     result = []
     for date, row in hist.iterrows():
-        result.append({
-            "date": date.strftime("%Y-%m-%d"),
-            "open": round(row["Open"], 2),
-            "high": round(row["High"], 2),
-            "low": round(row["Low"], 2),
-            "close": round(row["Close"], 2),
-            "volume": int(row["Volume"]),
-        })
+        try:
+            result.append({
+                "date": date.strftime("%Y-%m-%d"),
+                "open": round(float(row["Open"]), 2),
+                "high": round(float(row["High"]), 2),
+                "low": round(float(row["Low"]), 2),
+                "close": round(float(row["Close"]), 2),
+                "volume": int(float(row["Volume"])) if not pd.isna(row["Volume"]) else 0,
+            })
+        except Exception:
+            continue
     return result
 
 

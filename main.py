@@ -9,6 +9,7 @@ from routers.backtest import router as backtest_router
 from routers.sync import router as sync_router
 import os
 import sys
+import gc
 import logging
 import traceback
 import time
@@ -69,6 +70,12 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 _server_logger.info(
                     f"SLOW {request.method} {request.url.path} ({elapsed:.2f}s)"
                 )
+            # OOM 방지: 메모리 많이 쓰는 엔드포인트(차트/배치/뉴스) 응답 후 명시적 GC.
+            # Render free tier 512MB 한도 — yfinance가 DataFrame을 누적시켜 OOM 발생.
+            path = request.url.path
+            if any(seg in path for seg in (
+                "/chart", "/charts-batch", "/news", "/backtest", "/fundamentals")):
+                gc.collect()
             return response
         except Exception as exc:
             elapsed = time.monotonic() - start

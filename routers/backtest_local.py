@@ -266,16 +266,22 @@ def forward_chart(ticker: str, from_date: str, days: int = 120):
         if hist.empty:
             return []
         hist.index = hist.index.tz_localize(None) if hist.index.tzinfo else hist.index
+        # NaN OHLC 행 제거 — JSON 직렬화 ValueError 방지
+        import pandas as pd
+        hist = hist.dropna(subset=["Open", "High", "Low", "Close"])
         result = []
         for date, row in hist.iterrows():
-            result.append({
-                "date": date.strftime("%Y-%m-%d"),
-                "open": round(float(row["Open"]), 2),
-                "high": round(float(row["High"]), 2),
-                "low": round(float(row["Low"]), 2),
-                "close": round(float(row["Close"]), 2),
-                "volume": int(row["Volume"]),
-            })
+            try:
+                result.append({
+                    "date": date.strftime("%Y-%m-%d"),
+                    "open": round(float(row["Open"]), 2),
+                    "high": round(float(row["High"]), 2),
+                    "low": round(float(row["Low"]), 2),
+                    "close": round(float(row["Close"]), 2),
+                    "volume": int(float(row["Volume"])) if not pd.isna(row["Volume"]) else 0,
+                })
+            except Exception:
+                continue
             if len(result) >= days:
                 break
         return result
