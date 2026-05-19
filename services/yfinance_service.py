@@ -2,13 +2,14 @@ import gc
 import yfinance as yf
 import pandas as pd
 from services.news_utils import deduplicate_news, format_news_for_prompt
-from services.memory_monitor import mem_log
+from services.memory_monitor import mem_log, trim_memory
 
 # OOM 방지 — period cap. Render free tier 512MB에서 2y * 52종목 OHLCV는 위험.
 # 클라이언트가 더 큰 period 요청해도 서버에서 강제로 잘라냄.
 _MAX_PERIOD = "1y"
 _PERIOD_RANK = {"1d": 0, "5d": 1, "1mo": 2, "3mo": 3, "6mo": 4, "1y": 5,
                 "2y": 6, "5y": 7, "10y": 8, "ytd": 5, "max": 9}
+_CHART_CHUNK_SIZE = 10  # OOM 방지 — 한 번에 다운로드할 종목 수
 
 
 def _cap_period(period: str) -> str:
@@ -138,29 +139,23 @@ def get_stock_prices_batch(tickers: list[str]) -> dict:
     return result
 
 
-def get_charts_batch(tickers: list[str], period: str = "1y") -> dict:
+def _download_charts_chunk(chunk: list[str], period: str) -> dict:
     """
-    여러 종목 OHLCV 차트를 단일 yf.download 배치로 수집.
-    반환: {ticker: [{date, open, high, low, close, volume}, ...]}
-    실패 종목은 빈 리스트 반환.
+    chunk yf.download → list[dict] 변환 → 즉시 DataFrame 해제 + gc + malloc_trim.
     """
-    if not tickers:
-        return {}
-    clean = [t for t in tickers if t]
-    period = _cap_period(period)  # OOM 방지 — 최대 1y로 캡
-    mem_log(f"get_charts_batch 시작 ({len(clean)}종목, period={period})")
     try:
-        df = yf.download(clean, period=period, progress=False,
+        df = yf.download(chunk, period=period, progress=False,
                          auto_adjust=True, timeout=60)
     except Exception as e:
-        raise Exception(f"배치 차트 조회 실패: {e}")
+        print(f"[ERROR] chunk yf.download({chunk}) failed: {e}")
+        return {t.upper(): [] for t in chunk}
 
     if df.empty:
-        return {t.upper(): [] for t in clean}
+        return {t.upper(): [] for t in chunk}
 
     is_multi = isinstance(df.columns, pd.MultiIndex)
-    result = {}
-    for t in clean:
+    out = {}
+    for t in chunk:
         chart = []
         try:
             if is_multi:
@@ -169,7 +164,6 @@ def get_charts_batch(tickers: list[str], period: str = "1y") -> dict:
                 ticker_df = df
             for date, row in ticker_df.iterrows():
                 try:
-                    # OHLC 중 하나라도 NaN이면 행 스킵 (JSON 직렬화 ValueError 방지)
                     o, h, l, c = row["Open"], row["High"], row["Low"], row["Close"]
                     if pd.isna(o) or pd.isna(h) or pd.isna(l) or pd.isna(c):
                         continue
@@ -183,14 +177,35 @@ def get_charts_batch(tickers: list[str], period: str = "1y") -> dict:
                     })
                 except Exception:
                     continue
+            del ticker_df
         except Exception:
             chart = []
-        result[t.upper()] = chart
-    # OOM 방지 — 큰 DataFrame 즉시 해제
-    rows_total = sum(len(v) for v in result.values())
+        out[t.upper()] = chart
     del df
     gc.collect()
-    mem_log(f"get_charts_batch 완료 ({len(clean)}종목, {rows_total} rows) + gc")
+    trim_memory()
+    return out
+
+
+def get_charts_batch(tickers: list[str], period: str = "1y") -> dict:
+    """
+    OHLCV 차트를 chunk(10종목씩)로 수집 — 거대 DataFrame 회피.
+    각 chunk 후 즉시 list[dict] 변환 + del + gc + malloc_trim.
+    """
+    if not tickers:
+        return {}
+    clean = [t for t in tickers if t]
+    period = _cap_period(period)  # OOM 방지 — 최대 1y로 캡
+    mem_log(f"get_charts_batch 시작 ({len(clean)}종목, period={period})")
+    result = {}
+    chunk_count = (len(clean) + _CHART_CHUNK_SIZE - 1) // _CHART_CHUNK_SIZE
+    for i in range(0, len(clean), _CHART_CHUNK_SIZE):
+        chunk = clean[i : i + _CHART_CHUNK_SIZE]
+        chunk_idx = i // _CHART_CHUNK_SIZE + 1
+        result.update(_download_charts_chunk(chunk, period))
+        mem_log(f"get_charts_batch chunk {chunk_idx}/{chunk_count} ({len(chunk)}종목) 완료")
+    rows_total = sum(len(v) for v in result.values())
+    mem_log(f"get_charts_batch 전체 완료 ({len(clean)}종목, {rows_total} rows)")
     return result
 
 

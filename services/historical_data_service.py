@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from services.news_utils import deduplicate_news, format_news_for_prompt
 from services.sec_edgar_service import get_filing_map, match_column_to_report_date
-from services.memory_monitor import mem_log, reset_baseline
+from services.memory_monitor import mem_log, reset_baseline, trim_memory
 
 # 매크로 지표 티커
 MACRO_TICKERS = {
@@ -139,9 +139,70 @@ def _batch_nearest_closes(tickers, target_date: str) -> dict:
     return result
 
 
+_CHART_CHUNK_SIZE = 10  # OOM 방지 — 한 번에 다운로드할 종목 수
+
+
+def _convert_chart_df_to_list(ticker_df: pd.DataFrame) -> list[dict]:
+    """단일 종목 OHLCV DataFrame → list[dict] 변환 (공통 헬퍼)"""
+    ticker_df = ticker_df.dropna(subset=["Open", "High", "Low", "Close"])
+    chart = []
+    for date, row in ticker_df.iterrows():
+        try:
+            chart.append({
+                "date":   date.strftime("%Y-%m-%d"),
+                "open":   round(_safe_float(row["Open"]), 2),
+                "high":   round(_safe_float(row["High"]), 2),
+                "low":    round(_safe_float(row["Low"]), 2),
+                "close":  round(_safe_float(row["Close"]), 2),
+                "volume": int(_safe_float(row["Volume"])) if not pd.isna(row["Volume"]) else 0,
+            })
+        except Exception:
+            continue
+    return chart
+
+
+def _download_chart_chunk(chunk_tickers: list, start: str, end: str) -> dict:
+    """
+    chunk 단위 yf.download → list[dict] 변환 → 즉시 DataFrame 해제 + gc + malloc_trim.
+    OOM 방지 핵심: 거대한 단일 DataFrame을 만들지 않음.
+    """
+    from services.memory_monitor import trim_memory
+    chunk_result = {}
+    try:
+        with _yf_lock:
+            df = yf.download(chunk_tickers, start=start, end=end,
+                             progress=False, auto_adjust=True, timeout=60)
+    except Exception as e:
+        print(f"[ERROR] chunk yf.download({chunk_tickers}) failed: {e}")
+        return {t: [] for t in chunk_tickers}
+
+    if df.empty:
+        return {t: [] for t in chunk_tickers}
+
+    is_multi = isinstance(df.columns, pd.MultiIndex)
+    for ticker in chunk_tickers:
+        try:
+            if len(chunk_tickers) == 1 and not is_multi:
+                ticker_df = df
+            else:
+                ticker_df = df.xs(ticker, level=1, axis=1) if is_multi else df
+            chunk_result[ticker] = _convert_chart_df_to_list(ticker_df)
+            del ticker_df
+        except Exception as e:
+            print(f"[WARN] chunk chart extraction failed for {ticker}: {e}")
+            chunk_result[ticker] = []
+
+    # OOM 방지 — chunk DataFrame 즉시 해제 + OS에 메모리 반환
+    del df
+    gc.collect()
+    trim_memory()
+    return chunk_result
+
+
 def _batch_historical_charts(tickers: list, target_date: str, months: int = 3) -> dict:
     """
-    여러 종목의 OHLCV 차트를 단일 yf.download 배치 호출로 수집 (thread-safe).
+    OHLCV 차트를 chunk(10종목씩)로 수집 — 거대 DataFrame 회피.
+    각 chunk 후 즉시 list[dict] 변환 + del + gc + malloc_trim.
     """
     if not tickers:
         return {}
@@ -150,62 +211,26 @@ def _batch_historical_charts(tickers: list, target_date: str, months: int = 3) -
     end = target_date  # target_date 미포함 (전일까지만 — look-ahead bias 방지)
     start = (dt - timedelta(days=months * 31)).strftime("%Y-%m-%d")
 
-    try:
-        with _yf_lock:
-            df = yf.download(list(tickers), start=start, end=end,
-                             progress=False, auto_adjust=True, timeout=60)
-    except Exception as e:
-        print(f"[ERROR] batch chart yf.download({tickers}) failed: {e}")
-        df = pd.DataFrame()
-
-    if df.empty:
-        # 배치 실패 → 개별 fallback
-        print(f"[WARN] Batch chart download empty — falling back to individual downloads")
-        result = {}
-        for ticker in tickers:
-            result[ticker] = get_historical_chart(ticker, target_date, months)
-        return result
-
-    is_multi = isinstance(df.columns, pd.MultiIndex)
+    tickers_list = list(tickers)
     result = {}
-    for ticker in tickers:
-        try:
-            if len(tickers) == 1 and not is_multi:
-                ticker_df = df
-            else:
-                ticker_df = df.xs(ticker, level=1, axis=1) if is_multi else df
+    chunk_count = (len(tickers_list) + _CHART_CHUNK_SIZE - 1) // _CHART_CHUNK_SIZE
+    for i in range(0, len(tickers_list), _CHART_CHUNK_SIZE):
+        chunk = tickers_list[i : i + _CHART_CHUNK_SIZE]
+        chunk_idx = i // _CHART_CHUNK_SIZE + 1
+        chunk_res = _download_chart_chunk(chunk, start, end)
+        result.update(chunk_res)
+        mem_log(f"_batch_historical_charts chunk {chunk_idx}/{chunk_count} ({len(chunk)}종목) 완료")
 
-            # NaN OHLC 행 제거 — JSON 직렬화 ValueError 방지
-            ticker_df = ticker_df.dropna(subset=["Open", "High", "Low", "Close"])
-            chart = []
-            for date, row in ticker_df.iterrows():
-                try:
-                    chart.append({
-                        "date":   date.strftime("%Y-%m-%d"),
-                        "open":   round(_safe_float(row["Open"]), 2),
-                        "high":   round(_safe_float(row["High"]), 2),
-                        "low":    round(_safe_float(row["Low"]), 2),
-                        "close":  round(_safe_float(row["Close"]), 2),
-                        "volume": int(_safe_float(row["Volume"])) if not pd.isna(row["Volume"]) else 0,
-                    })
-                except Exception:
-                    continue
-            result[ticker] = chart
-        except Exception as e:
-            print(f"[WARN] batch chart extraction failed for {ticker}: {e}")
-            result[ticker] = []
-
-    # 모든 차트가 비어있으면 → 개별 다운로드 fallback (Render 등 배치 차단 대응)
+    # 모든 차트가 비어있으면 → 개별 다운로드 fallback
     if result and all(not v for v in result.values()):
-        print(f"[WARN] Batch chart download empty — falling back to individual downloads")
-        for ticker in tickers:
+        print(f"[WARN] All chunks empty — falling back to individual downloads")
+        for ticker in tickers_list:
             result[ticker] = get_historical_chart(ticker, target_date, months)
 
-    # OOM 방지 — 큰 DataFrame 즉시 해제 (52종목 12개월 OHLCV)
     rows_total = sum(len(v) for v in result.values())
-    del df
     gc.collect()
-    mem_log(f"_batch_historical_charts 완료 ({len(tickers)}종목, {rows_total} rows) + gc")
+    trim_memory()
+    mem_log(f"_batch_historical_charts 전체 완료 ({len(tickers_list)}종목, {rows_total} rows) + trim")
     return result
 
 
@@ -458,7 +483,7 @@ def get_historical_fundamentals(ticker: str, target_date: str) -> dict:
         revenue_growth  = yoy(revenue)  or yoy_annual(["Total Revenue", "Operating Revenue"])
         earnings_growth = yoy(net_income) or yoy_annual(["Net Income", "Net Income Common Stockholders"])
 
-        return {
+        result = {
             "ticker":            ticker.upper(),
             "trailing_pe":       r(trailing_pe),
             "forward_pe":        None,  # 과거 시점의 forward EPS 추정치는 접근 불가
@@ -481,6 +506,15 @@ def get_historical_fundamentals(ticker: str, target_date: str) -> dict:
             "_report_date":      latest_b.strftime("%Y-%m-%d") if latest_b else None,
             "_filed_date":       latest_filing_date,
         }
+        # OOM 방지 — yf.Ticker 인스턴스 + 3개 DataFrame(qf/qb/af) 명시적 해제.
+        # yfinance Ticker는 내부 캐시를 보유하므로 함수 끝 GC만으로는 부족.
+        try:
+            del stock, qf, qb, af, net_income, revenue, gross_profit, op_income
+            del total_assets, total_liabilities, equity, total_debt
+            del current_assets, current_liab, shares_out
+        except Exception:
+            pass
+        return result
     except Exception as e:
         print(f"[WARN] Fundamentals failed for {ticker}: {e}")
         return {"ticker": ticker.upper()}
@@ -653,10 +687,11 @@ async def get_full_historical_context(
     print(f"[INFO] Prices: {len(prices)}/{len(tickers)}, "
           f"Charts: {sum(1 for c in charts.values() if c)}/{len(tickers)}")
 
-    # OOM 방지 — Phase 1 DataFrame 컨테이너 즉시 해제
+    # OOM 방지 — Phase 1 DataFrame 컨테이너 즉시 해제 + OS 반환
     del batch_results
     gc.collect()
-    mem_log("Phase 1 후 gc.collect() 완료")
+    trim_memory()
+    mem_log("Phase 1 후 gc.collect()+trim 완료")
 
     # ── Phase 2: 펀더멘털 (yf.Ticker — Lock 보호, 순차) ──────────────
     fundamentals = {}
@@ -667,12 +702,14 @@ async def get_full_historical_context(
         except Exception as e:
             print(f"[ERROR] Fundamentals for {ticker}: {e}")
             fundamentals[ticker] = {"ticker": ticker.upper()}
-        # 10개마다 메모리 체크 (펀더멘털이 가장 누적 위험)
+        # 10개마다 메모리 회수 + 체크 (펀더멘털 누적 hog 직접 차단)
         if (idx + 1) % 10 == 0:
-            mem_log(f"Phase 2 진행 {idx+1}/{len(tickers)} 펀더멘털")
-    # 펀더멘털 끝나면 yfinance Ticker 내부 캐시 + 임시 DataFrame 정리
+            gc.collect()
+            trim_memory()
+            mem_log(f"Phase 2 진행 {idx+1}/{len(tickers)} 펀더멘털 (gc+trim)")
     gc.collect()
-    mem_log(f"Phase 2 완료 (펀더멘털 {len(tickers)}종목) + gc.collect()")
+    trim_memory()
+    mem_log(f"Phase 2 완료 (펀더멘털 {len(tickers)}종목) + gc+trim")
 
     # ── Phase 3: Finnhub 뉴스 (순차, rate limit 보호) ─────────────────
     news = {t: [] for t in tickers}

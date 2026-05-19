@@ -7,6 +7,7 @@ psutil 미설치 환경에선 자동으로 no-op (서비스 자체는 죽지 않
 출력 경로: 'stockapp.server' logger (main.py가 설정한 file + stdout 핸들러 모두 사용).
 → /server-logs 엔드포인트로 외부에서 진단 가능.
 """
+import ctypes
 import logging
 import os
 import threading
@@ -21,6 +22,29 @@ try:
 except Exception:
     _proc = None
     _HAS_PSUTIL = False
+
+# Linux glibc malloc_trim — gc.collect() 후 free된 heap 영역을 OS로 반환.
+# Python 기본 할당자(pymalloc + glibc)는 free된 메모리를 process arena에 보유하므로
+# gc.collect()를 해도 RSS가 줄지 않는다. malloc_trim(0)을 호출해야 OS에 반환됨.
+try:
+    _libc = ctypes.CDLL("libc.so.6")
+    _libc.malloc_trim.argtypes = [ctypes.c_size_t]
+    _libc.malloc_trim.restype = ctypes.c_int
+    _HAS_MALLOC_TRIM = True
+except Exception:
+    _libc = None
+    _HAS_MALLOC_TRIM = False
+
+
+def trim_memory() -> bool:
+    """glibc malloc_trim(0) 호출 — gc.collect() 직후에 부르면 RSS 대폭 감소 가능."""
+    if not _HAS_MALLOC_TRIM:
+        return False
+    try:
+        _libc.malloc_trim(0)
+        return True
+    except Exception:
+        return False
 
 # Render free tier 메모리 한도 (MB)
 RENDER_LIMIT_MB = 512
