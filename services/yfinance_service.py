@@ -1,6 +1,24 @@
+import gc
 import yfinance as yf
 import pandas as pd
 from services.news_utils import deduplicate_news, format_news_for_prompt
+from services.memory_monitor import mem_log
+
+# OOM 방지 — period cap. Render free tier 512MB에서 2y * 52종목 OHLCV는 위험.
+# 클라이언트가 더 큰 period 요청해도 서버에서 강제로 잘라냄.
+_MAX_PERIOD = "1y"
+_PERIOD_RANK = {"1d": 0, "5d": 1, "1mo": 2, "3mo": 3, "6mo": 4, "1y": 5,
+                "2y": 6, "5y": 7, "10y": 8, "ytd": 5, "max": 9}
+
+
+def _cap_period(period: str) -> str:
+    """클라이언트 요청 period를 _MAX_PERIOD로 캡."""
+    p = (period or "").lower()
+    max_p = _MAX_PERIOD.lower()
+    if _PERIOD_RANK.get(p, 99) > _PERIOD_RANK.get(max_p, 5):
+        print(f"[INFO] period cap: {period} → {_MAX_PERIOD} (OOM 방지)")
+        return _MAX_PERIOD
+    return period or _MAX_PERIOD
 
 ECONOMY_KEYWORDS = [
     "stock", "market", "economy", "economic", "finance", "financial",
@@ -114,6 +132,9 @@ def get_stock_prices_batch(tickers: list[str]) -> dict:
             }
         except Exception:
             continue
+    # OOM 방지 — 5d DataFrame은 작지만 자주 호출됨
+    del df
+    gc.collect()
     return result
 
 
@@ -126,6 +147,8 @@ def get_charts_batch(tickers: list[str], period: str = "1y") -> dict:
     if not tickers:
         return {}
     clean = [t for t in tickers if t]
+    period = _cap_period(period)  # OOM 방지 — 최대 1y로 캡
+    mem_log(f"get_charts_batch 시작 ({len(clean)}종목, period={period})")
     try:
         df = yf.download(clean, period=period, progress=False,
                          auto_adjust=True, timeout=60)
@@ -163,6 +186,11 @@ def get_charts_batch(tickers: list[str], period: str = "1y") -> dict:
         except Exception:
             chart = []
         result[t.upper()] = chart
+    # OOM 방지 — 큰 DataFrame 즉시 해제
+    rows_total = sum(len(v) for v in result.values())
+    del df
+    gc.collect()
+    mem_log(f"get_charts_batch 완료 ({len(clean)}종목, {rows_total} rows) + gc")
     return result
 
 

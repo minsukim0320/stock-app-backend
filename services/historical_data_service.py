@@ -3,6 +3,7 @@
 백테스팅 시뮬레이션용 - 해당 시점에 존재했던 데이터만 사용 (look-ahead bias 방지)
 """
 import asyncio
+import gc
 import threading
 import pandas as pd
 import yfinance as yf
@@ -11,6 +12,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from services.news_utils import deduplicate_news, format_news_for_prompt
 from services.sec_edgar_service import get_filing_map, match_column_to_report_date
+from services.memory_monitor import mem_log, reset_baseline
 
 # 매크로 지표 티커
 MACRO_TICKERS = {
@@ -199,6 +201,11 @@ def _batch_historical_charts(tickers: list, target_date: str, months: int = 3) -
         for ticker in tickers:
             result[ticker] = get_historical_chart(ticker, target_date, months)
 
+    # OOM 방지 — 큰 DataFrame 즉시 해제 (52종목 12개월 OHLCV)
+    rows_total = sum(len(v) for v in result.values())
+    del df
+    gc.collect()
+    mem_log(f"_batch_historical_charts 완료 ({len(tickers)}종목, {rows_total} rows) + gc")
     return result
 
 
@@ -602,6 +609,9 @@ async def get_full_historical_context(
     if not has_finnhub:
         print(f"[WARN] No Finnhub API key provided — news will be skipped for all tickers")
 
+    reset_baseline()
+    mem_log(f"historical-context 시작 ({target_date}, {len(tickers)} tickers)")
+
     # ── Phase 1: 배치 yf.download (매크로 + 종목가격 + 차트) ──────────
     # 각 배치 함수가 내부적으로 _yf_lock을 사용하므로 순차 실행되지만,
     # asyncio.to_thread로 감싸서 이벤트 루프를 블로킹하지 않음
@@ -613,6 +623,7 @@ async def get_full_historical_context(
         macro_future, prices_future, charts_future,
         return_exceptions=True,
     )
+    mem_log("Phase 1 완료 (매크로+가격+차트 batch yf.download)")
 
     # 매크로
     if isinstance(batch_results[0], Exception):
@@ -642,15 +653,26 @@ async def get_full_historical_context(
     print(f"[INFO] Prices: {len(prices)}/{len(tickers)}, "
           f"Charts: {sum(1 for c in charts.values() if c)}/{len(tickers)}")
 
+    # OOM 방지 — Phase 1 DataFrame 컨테이너 즉시 해제
+    del batch_results
+    gc.collect()
+    mem_log("Phase 1 후 gc.collect() 완료")
+
     # ── Phase 2: 펀더멘털 (yf.Ticker — Lock 보호, 순차) ──────────────
     fundamentals = {}
-    for ticker in tickers:
+    for idx, ticker in enumerate(tickers):
         try:
             fund = await asyncio.to_thread(get_historical_fundamentals, ticker, target_date)
             fundamentals[ticker] = fund
         except Exception as e:
             print(f"[ERROR] Fundamentals for {ticker}: {e}")
             fundamentals[ticker] = {"ticker": ticker.upper()}
+        # 10개마다 메모리 체크 (펀더멘털이 가장 누적 위험)
+        if (idx + 1) % 10 == 0:
+            mem_log(f"Phase 2 진행 {idx+1}/{len(tickers)} 펀더멘털")
+    # 펀더멘털 끝나면 yfinance Ticker 내부 캐시 + 임시 DataFrame 정리
+    gc.collect()
+    mem_log(f"Phase 2 완료 (펀더멘털 {len(tickers)}종목) + gc.collect()")
 
     # ── Phase 3: Finnhub 뉴스 (순차, rate limit 보호) ─────────────────
     news = {t: [] for t in tickers}
@@ -691,6 +713,8 @@ async def get_full_historical_context(
             print(f"[ERROR] Korean politics news fetch failed: {e}")
     else:
         print("[WARN] SerpAPI key not provided — skipping intl & Korean politics news")
+
+    mem_log("Phase 3+4 완료 (뉴스) — 응답 직렬화 직전")
 
     return {
         "target_date":      target_date,

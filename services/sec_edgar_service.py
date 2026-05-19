@@ -12,6 +12,7 @@ target_date 시점에 실제로 공개된 분기만 골라 쓸 수 있게 해준
 """
 import requests
 import threading
+from collections import OrderedDict
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -22,7 +23,10 @@ _SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 
 # 프로세스 수명 동안 공유되는 캐시 (SEC 데이터는 거의 변경되지 않음)
 _cik_cache: Optional[dict] = None
-_filings_cache: dict = {}
+# OOM 방지 — LRU(최대 100 entries)로 무한 증가 차단.
+# 종목당 filings ~50KB → 100개면 ~5MB 상한.
+_FILINGS_CACHE_MAX = 100
+_filings_cache: "OrderedDict[str, list]" = OrderedDict()
 _cache_lock = threading.Lock()
 
 
@@ -54,11 +58,16 @@ def _load_cik_map() -> dict:
 
 
 def _fetch_filings(cik: str) -> list:
-    """CIK의 10-Q/10-K 공시 이력 조회. (form, filingDate, reportDate) 튜플 리스트. 캐싱."""
+    """CIK의 10-Q/10-K 공시 이력 조회. (form, filingDate, reportDate) 튜플 리스트. LRU 캐싱."""
+    # 캐시 hit — move_to_end로 LRU 갱신
     if cik in _filings_cache:
-        return _filings_cache[cik]
+        with _cache_lock:
+            if cik in _filings_cache:
+                _filings_cache.move_to_end(cik)
+                return _filings_cache[cik]
     with _cache_lock:
         if cik in _filings_cache:
+            _filings_cache.move_to_end(cik)
             return _filings_cache[cik]
         try:
             resp = requests.get(
@@ -80,6 +89,11 @@ def _fetch_filings(cik: str) -> list:
         except Exception as e:
             print(f"[ERROR] SEC filings fetch failed for CIK {cik}: {e}")
             _filings_cache[cik] = []
+        # LRU 크기 제한 — 오래된 entry부터 제거
+        while len(_filings_cache) > _FILINGS_CACHE_MAX:
+            evicted_cik, _ = _filings_cache.popitem(last=False)
+            print(f"[INFO] SEC filings cache LRU evict: CIK {evicted_cik} "
+                  f"(size={len(_filings_cache)}/{_FILINGS_CACHE_MAX})")
     return _filings_cache[cik]
 
 

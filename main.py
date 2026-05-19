@@ -7,6 +7,7 @@ from routers.stocks import router as stocks_router
 from routers.tracking import router as tracking_router
 from routers.backtest import router as backtest_router
 from routers.sync import router as sync_router
+from services.memory_monitor import mem_log, get_rss_mb, CRITICAL_THRESHOLD_MB
 import os
 import sys
 import gc
@@ -51,38 +52,58 @@ app.add_middleware(
 
 
 # ── 모든 요청과 에러를 로깅하는 미들웨어 ──────────────────────────────
+# 메모리 무거운 엔드포인트 — 진단 로그 + 응답 후 강제 GC
+_HEAVY_PATH_SEGMENTS = ("/chart", "/charts-batch", "/news", "/backtest",
+                        "/fundamentals", "/historical-context")
+
+
 class LoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         # 로그 조회 엔드포인트는 스킵 (무한 루프 방지)
         if request.url.path in ("/server-logs", "/logs"):
             return await call_next(request)
 
+        path = request.url.path
+        is_heavy = any(seg in path for seg in _HEAVY_PATH_SEGMENTS)
         start = time.monotonic()
+        rss_before = None
+        if is_heavy:
+            rss_before = get_rss_mb()
+            mem_log(f"REQ START {request.method} {path}")
         try:
             response = await call_next(request)
             elapsed = time.monotonic() - start
             # 4xx/5xx는 WARN, 그 외는 조용히 INFO (30초 이상만)
             if response.status_code >= 400:
                 _server_logger.warning(
-                    f"{request.method} {request.url.path} → HTTP {response.status_code} ({elapsed:.2f}s)"
+                    f"{request.method} {path} → HTTP {response.status_code} ({elapsed:.2f}s)"
                 )
             elif elapsed > 30:
                 _server_logger.info(
-                    f"SLOW {request.method} {request.url.path} ({elapsed:.2f}s)"
+                    f"SLOW {request.method} {path} ({elapsed:.2f}s)"
                 )
-            # OOM 방지: 메모리 많이 쓰는 엔드포인트(차트/배치/뉴스) 응답 후 명시적 GC.
-            # Render free tier 512MB 한도 — yfinance가 DataFrame을 누적시켜 OOM 발생.
-            path = request.url.path
-            if any(seg in path for seg in (
-                "/chart", "/charts-batch", "/news", "/backtest", "/fundamentals")):
+            # OOM 방지: 메모리 많이 쓰는 엔드포인트 응답 후 명시적 GC + 진단 로그.
+            # Render free tier 512MB 한도 — yfinance DataFrame 누적 차단.
+            if is_heavy:
                 gc.collect()
+                rss_after = get_rss_mb()
+                if rss_after is not None and rss_before is not None:
+                    delta = rss_after - rss_before
+                    tag = "MEM🔥" if rss_after >= CRITICAL_THRESHOLD_MB else "MEM"
+                    _server_logger.info(
+                        f"[{tag}] REQ END {request.method} {path} "
+                        f"({elapsed:.2f}s, {rss_before:.0f}→{rss_after:.0f}MB, "
+                        f"Δ{'+' if delta >= 0 else ''}{delta:.1f}MB)"
+                    )
             return response
         except Exception as exc:
             elapsed = time.monotonic() - start
             tb = traceback.format_exc()
+            rss_now = get_rss_mb()
+            mem_str = f" RSS={rss_now:.0f}MB" if rss_now is not None else ""
             _server_logger.error(
-                f"UNHANDLED {type(exc).__name__} at {request.method} {request.url.path} "
-                f"({elapsed:.2f}s): {exc}\n{tb}"
+                f"UNHANDLED {type(exc).__name__} at {request.method} {path} "
+                f"({elapsed:.2f}s){mem_str}: {exc}\n{tb}"
             )
             return JSONResponse(status_code=500, content={"detail": str(exc)})
 
@@ -90,6 +111,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 app.add_middleware(LoggingMiddleware)
 
 _server_logger.info("Server starting up — logging initialized")
+mem_log("Server startup baseline (after imports)")
 
 
 app.include_router(stocks_router)
