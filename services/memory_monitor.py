@@ -3,10 +3,16 @@ OOM 진단용 메모리 모니터링 헬퍼.
 
 각 phase에서 mem_log("label") 호출 시 RSS(MB) + 변화량 + 514MB(Render free) 대비 % 출력.
 psutil 미설치 환경에선 자동으로 no-op (서비스 자체는 죽지 않음).
+
+출력 경로: 'stockapp.server' logger (main.py가 설정한 file + stdout 핸들러 모두 사용).
+→ /server-logs 엔드포인트로 외부에서 진단 가능.
 """
+import logging
 import os
 import threading
 from typing import Optional
+
+_logger = logging.getLogger("stockapp.server")
 
 try:
     import psutil
@@ -38,20 +44,20 @@ def get_rss_mb() -> Optional[float]:
 
 def mem_log(label: str, force_print: bool = True) -> Optional[float]:
     """
-    메모리 사용량 로그 출력.
+    메모리 사용량 로그 출력 — server.log(file) + stdout 양쪽에 기록.
     - label: 구분용 라벨 (예: 'historical-context Phase 1 시작')
     - 반환: 현재 RSS(MB) or None
 
     출력 예시:
       [MEM]  185.3 MB ( 36%, Δ+12.4) | Phase 1 차트 fetch 완료
-      [MEM⚠] 395.1 MB ( 77%, Δ+45.2) | Phase 2 펀더멘털 완료
-      [MEM🔥] 478.2 MB ( 93%, Δ+83.1) | 응답 직렬화 직전 — OOM 임박
+      [MEM!] 395.1 MB ( 77%, Δ+45.2) | Phase 2 펀더멘털 완료 (WARN)
+      [MEM*] 478.2 MB ( 93%, Δ+83.1) | 응답 직렬화 직전 (CRITICAL)
     """
     global _last_rss_mb
     rss = get_rss_mb()
     if rss is None:
         if force_print:
-            print(f"[MEM?] (psutil unavailable) | {label}")
+            _logger.warning(f"[MEM?] (psutil unavailable) | {label}")
         return None
 
     with _lock:
@@ -59,15 +65,17 @@ def mem_log(label: str, force_print: bool = True) -> Optional[float]:
         _last_rss_mb = rss
 
     pct = rss / RENDER_LIMIT_MB * 100
-    if rss >= CRITICAL_THRESHOLD_MB:
-        tag = "MEM🔥"
-    elif rss >= WARN_THRESHOLD_MB:
-        tag = "MEM⚠"
-    else:
-        tag = "MEM "
-
     sign = "+" if delta >= 0 else ""
-    print(f"[{tag}] {rss:6.1f} MB ({pct:3.0f}%, Δ{sign}{delta:5.1f}) | {label}")
+    msg = f"{rss:6.1f} MB ({pct:3.0f}%, Δ{sign}{delta:5.1f}) | {label}"
+
+    # 임계별로 로그 레벨 달리해서 server.log + stdout 양쪽에 기록.
+    # _server_logger는 main.py에서 file handler + stdout handler 모두 부착.
+    if rss >= CRITICAL_THRESHOLD_MB:
+        _logger.error(f"[MEM*CRIT] {msg}")
+    elif rss >= WARN_THRESHOLD_MB:
+        _logger.warning(f"[MEM!WARN] {msg}")
+    else:
+        _logger.info(f"[MEM] {msg}")
     return rss
 
 
